@@ -8,65 +8,66 @@
 
 namespace {
 
-struct Mask {
-  uint64_t w[4];
+template <int W>
+struct Bits {
+  uint64_t w[W];
 
-  inline void clear(int words) {
-    for (int i = 0; i < words; ++i) w[i] = 0;
+  inline void clear() {
+    for (int i = 0; i < W; ++i) w[i] = 0;
   }
-  inline bool any(int words) const {
+  inline bool any() const {
     uint64_t acc = 0;
-    for (int i = 0; i < words; ++i) acc |= w[i];
+    for (int i = 0; i < W; ++i) acc |= w[i];
     return acc != 0;
   }
-  inline bool equals(const Mask& o, int words) const {
-    for (int i = 0; i < words; ++i) {
+  inline bool equals(const Bits& o) const {
+    for (int i = 0; i < W; ++i) {
       if (w[i] != o.w[i]) return false;
     }
     return true;
   }
   inline void set(int i) { w[i >> 6] |= (1ULL << (i & 63)); }
   inline void reset(int i) { w[i >> 6] &= ~(1ULL << (i & 63)); }
-  inline int count(int words) const {
+  inline int count() const {
     int s = 0;
-    for (int i = 0; i < words; ++i) s += __builtin_popcountll(w[i]);
+    for (int i = 0; i < W; ++i) s += __builtin_popcountll(w[i]);
     return s;
   }
-  inline int ctz(int words) const {
-    for (int i = 0; i < words; ++i) {
+  inline int ctz() const {
+    for (int i = 0; i < W; ++i) {
       if (w[i]) return (i << 6) + __builtin_ctzll(w[i]);
     }
     return -1;
   }
-  inline bool intersects(const Mask& o, int words) const {
-    for (int i = 0; i < words; ++i) {
+  inline bool intersects(const Bits& o) const {
+    for (int i = 0; i < W; ++i) {
       if (w[i] & o.w[i]) return true;
     }
     return false;
   }
-  inline int andCount(const Mask& o, int words) const {
+  inline int andCount(const Bits& o) const {
     int s = 0;
-    for (int i = 0; i < words; ++i) s += __builtin_popcountll(w[i] & o.w[i]);
+    for (int i = 0; i < W; ++i) s += __builtin_popcountll(w[i] & o.w[i]);
     return s;
   }
-  inline Mask bitAnd(const Mask& o, int words) const {
-    Mask r;
-    for (int i = 0; i < words; ++i) r.w[i] = w[i] & o.w[i];
+  inline Bits operator&(const Bits& o) const {
+    Bits r;
+    for (int i = 0; i < W; ++i) r.w[i] = w[i] & o.w[i];
     return r;
   }
-  inline Mask andNot(const Mask& o, int words) const {
-    Mask r;
-    for (int i = 0; i < words; ++i) r.w[i] = w[i] & ~o.w[i];
+  inline Bits andNot(const Bits& o) const {
+    Bits r;
+    for (int i = 0; i < W; ++i) r.w[i] = w[i] & ~o.w[i];
     return r;
   }
-  inline void orEq(const Mask& o, int words) {
-    for (int i = 0; i < words; ++i) w[i] |= o.w[i];
+  inline void orEq(const Bits& o) {
+    for (int i = 0; i < W; ++i) w[i] |= o.w[i];
   }
-  inline void andEq(const Mask& o, int words) {
-    for (int i = 0; i < words; ++i) w[i] &= o.w[i];
+  inline void andEq(const Bits& o) {
+    for (int i = 0; i < W; ++i) w[i] &= o.w[i];
   }
-  inline void andNotEq(const Mask& o, int words) {
-    for (int i = 0; i < words; ++i) w[i] &= ~o.w[i];
+  inline void andNotEq(const Bits& o) {
+    for (int i = 0; i < W; ++i) w[i] &= ~o.w[i];
   }
 };
 
@@ -81,24 +82,27 @@ struct SubResult {
   std::vector<uint8_t> flatBoards;
 };
 
-class WalledBranchAndBound {
+template <int W>
+class ComponentSolver {
  public:
+  static constexpr int kMaxCells = W * 64;
+  static constexpr int kSegWords = (W == 1) ? 1 : 2;
+  static constexpr int kMaxSegs = kSegWords * 64;
+
   int m = 0;
-  int words = 1;
-  std::vector<Mask> adj;
+  std::vector<Bits<W>> adj;
   std::vector<uint16_t> cellSeg;
-  std::vector<Mask> segMasks;
+  std::vector<Bits<W>> segMasks;
   std::vector<uint8_t> globalIds;
   int segCount[4] = {0, 0, 0, 0};
   int segBase[4] = {0, 0, 0, 0};
 
   int bestCount = 0;
   std::vector<uint8_t> flatBoards;
-  uint8_t curBoard[256];
+  uint8_t curBoard[kMaxCells];
 
   void buildComponent(int compSize, const int* compCells, const std::vector<CellInfo>& cells) {
     m = compSize;
-    words = (m + 63) >> 6;
     globalIds.resize(static_cast<size_t>(m));
     for (int i = 0; i < m; ++i) globalIds[i] = static_cast<uint8_t>(compCells[i]);
 
@@ -106,20 +110,19 @@ class WalledBranchAndBound {
     for (int i = 0; i < m; ++i) {
       const CellInfo& ci = cells[compCells[i]];
       for (int d = 0; d < 4; ++d) {
-        if (static_cast<int>(ci.seg[d]) + 1 > maxGlobalSeg) {
-          maxGlobalSeg = static_cast<int>(ci.seg[d]) + 1;
-        }
+        const int s = static_cast<int>(ci.seg[d]) + 1;
+        if (s > maxGlobalSeg) maxGlobalSeg = s;
       }
     }
 
-    std::vector<int> segMap(static_cast<size_t>(maxGlobalSeg), -1);
+    std::vector<int16_t> segMap(static_cast<size_t>(maxGlobalSeg), -1);
     cellSeg.resize(static_cast<size_t>(m) * 4);
     int totalSegs = 0;
 
     for (int d = 0; d < 4; ++d) {
       segBase[d] = totalSegs;
       std::fill(segMap.begin(), segMap.end(), -1);
-      int localCnt = 0;
+      int16_t localCnt = 0;
       for (int i = 0; i < m; ++i) {
         const int gSeg = cells[compCells[i]].seg[d];
         if (segMap[gSeg] < 0) segMap[gSeg] = localCnt++;
@@ -130,40 +133,38 @@ class WalledBranchAndBound {
     }
 
     segMasks.resize(static_cast<size_t>(totalSegs));
-    for (int s = 0; s < totalSegs; ++s) segMasks[s].clear(words);
+    for (int s = 0; s < totalSegs; ++s) segMasks[s].clear();
     for (int i = 0; i < m; ++i) {
       for (int d = 0; d < 4; ++d) {
-        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d];
-        segMasks[sIdx].set(i);
+        segMasks[static_cast<size_t>(segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d])].set(i);
       }
     }
 
     adj.resize(static_cast<size_t>(m));
     for (int i = 0; i < m; ++i) {
-      Mask mask;
-      mask.clear(words);
+      Bits<W> mask;
+      mask.clear();
       for (int d = 0; d < 4; ++d) {
-        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d];
-        mask.orEq(segMasks[sIdx], words);
+        mask.orEq(segMasks[static_cast<size_t>(segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d])]);
       }
       mask.reset(i);
       adj[i] = mask;
     }
   }
 
-  int greedyLowerBound(Mask avail) const {
+  int greedyLowerBound(Bits<W> avail) const {
     int best = 0;
     for (int mode = 0; mode < 2; ++mode) {
-      Mask rem = avail;
+      Bits<W> rem = avail;
       int cnt = 0;
-      while (rem.any(words)) {
+      while (rem.any()) {
         int pick = -1;
         int bestScore = 1000000;
-        Mask it = rem;
-        while (it.any(words)) {
-          const int u = it.ctz(words);
+        Bits<W> it = rem;
+        while (it.any()) {
+          const int u = it.ctz();
           it.reset(u);
-          const int deg = rem.andCount(adj[u], words);
+          const int deg = rem.andCount(adj[u]);
           const int score = (mode == 0) ? deg : (deg * 256 - u);
           if (score < bestScore) {
             bestScore = score;
@@ -172,7 +173,7 @@ class WalledBranchAndBound {
           }
         }
         ++cnt;
-        rem.andNotEq(adj[pick], words);
+        rem.andNotEq(adj[pick]);
         rem.reset(pick);
       }
       if (cnt > best) best = cnt;
@@ -180,59 +181,57 @@ class WalledBranchAndBound {
     return best;
   }
 
-  int cliqueCoverBound(Mask rem) const {
+  int cliqueCoverBound(Bits<W> rem, int limit) const {
     int cliques = 0;
-    while (rem.any(words)) {
+    while (rem.any()) {
       ++cliques;
-      const int u = rem.ctz(words);
-      Mask bestSeg;
+      if (cliques >= limit) return cliques;
+      const int u = rem.ctz();
+      Bits<W> bestSeg;
       int bestSize = 0;
       for (int d = 0; d < 4; ++d) {
-        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(u) * 4 + d];
-        const Mask hit = rem.bitAnd(segMasks[sIdx], words);
-        const int sz = hit.count(words);
+        const Bits<W> hit = rem & segMasks[static_cast<size_t>(segBase[d] + cellSeg[static_cast<size_t>(u) * 4 + d])];
+        const int sz = hit.count();
         if (sz > bestSize) {
           bestSize = sz;
           bestSeg = hit;
         }
       }
-      Mask common = rem.andNot(bestSeg, words);
-      Mask memb = bestSeg;
-      while (memb.any(words) && common.any(words)) {
-        const int v = memb.ctz(words);
+      Bits<W> common = rem.andNot(bestSeg);
+      Bits<W> memb = bestSeg;
+      while (memb.any() && common.any()) {
+        const int v = memb.ctz();
         memb.reset(v);
-        common.andEq(adj[v], words);
+        common.andEq(adj[v]);
       }
-      while (common.any(words)) {
-        const int w = common.ctz(words);
+      while (common.any()) {
+        const int w = common.ctz();
         common.reset(w);
         bestSeg.set(w);
-        common.andEq(adj[w], words);
+        common.andEq(adj[w]);
       }
-      rem.andNotEq(bestSeg, words);
+      rem.andNotEq(bestSeg);
     }
     return cliques;
   }
 
-  bool bipartiteCanReach(const Mask& avail, int dL, int dR, int need) const {
+  bool bipartiteCanReach(const Bits<W>& avail, int dL, int dR, int need) const {
     const int nL = segCount[dL];
     const int nR = segCount[dR];
     if (need <= 0) return true;
-    if (nL < need || nR < need) return false;
+    if (nL < need || nR < need || nL > kMaxSegs || nR > kMaxSegs) return nL >= need && nR >= need;
 
-    const int rWords = (nR + 63) >> 6;
-    uint64_t lAdj[128 * 2];
-    int16_t lToIdx[128];
-    int16_t matchR[128];
-    uint8_t unmatchedL[128];
+    Bits<kSegWords> lAdj[kMaxSegs];
+    int16_t lToIdx[kMaxSegs];
+    int16_t matchR[kMaxSegs];
+    uint8_t unmatchedL[kMaxSegs];
 
     int activeCount = 0;
     const int baseL = segBase[dL];
     for (int l = 0; l < nL; ++l) {
-      if (avail.intersects(segMasks[baseL + l], words)) {
+      if (avail.intersects(segMasks[static_cast<size_t>(baseL + l)])) {
         lToIdx[l] = static_cast<int16_t>(activeCount);
-        uint64_t* row = lAdj + activeCount * rWords;
-        for (int rw = 0; rw < rWords; ++rw) row[rw] = 0;
+        lAdj[activeCount].clear();
         ++activeCount;
       } else {
         lToIdx[l] = -1;
@@ -240,13 +239,12 @@ class WalledBranchAndBound {
     }
     if (activeCount < need) return false;
 
-    Mask it = avail;
-    while (it.any(words)) {
-      const int u = it.ctz(words);
+    Bits<W> it = avail;
+    while (it.any()) {
+      const int u = it.ctz();
       it.reset(u);
       const int idx = lToIdx[cellSeg[static_cast<size_t>(u) * 4 + dL]];
-      const int rSeg = cellSeg[static_cast<size_t>(u) * 4 + dR];
-      lAdj[idx * rWords + (rSeg >> 6)] |= (1ULL << (rSeg & 63));
+      lAdj[idx].set(cellSeg[static_cast<size_t>(u) * 4 + dR]);
     }
 
     for (int r = 0; r < nR; ++r) matchR[r] = -1;
@@ -254,9 +252,8 @@ class WalledBranchAndBound {
     int matched = 0;
     for (int i = 0; i < activeCount; ++i) {
       unmatchedL[i] = 1;
-      const uint64_t* row = lAdj + i * rWords;
-      for (int rw = 0; rw < rWords; ++rw) {
-        uint64_t bits = row[rw];
+      for (int rw = 0; rw < kSegWords; ++rw) {
+        uint64_t bits = lAdj[i].w[rw];
         while (bits) {
           const int b = __builtin_ctzll(bits);
           const int r = (rw << 6) + b;
@@ -264,7 +261,7 @@ class WalledBranchAndBound {
             matchR[r] = static_cast<int16_t>(i);
             unmatchedL[i] = 0;
             ++matched;
-            rw = rWords;
+            rw = kSegWords;
             break;
           }
           bits &= bits - 1ULL;
@@ -276,14 +273,13 @@ class WalledBranchAndBound {
     int remLeft = activeCount - matched;
     if (matched + remLeft < need) return false;
 
-    auto dfs = [&](auto& self, int u, uint64_t* vis) -> bool {
-      const uint64_t* row = lAdj + u * rWords;
-      for (int rw = 0; rw < rWords; ++rw) {
-        uint64_t availR = row[rw] & ~vis[rw];
+    auto dfs = [&](auto& self, int u, Bits<kSegWords>& vis) -> bool {
+      for (int rw = 0; rw < kSegWords; ++rw) {
+        uint64_t availR = lAdj[u].w[rw] & ~vis.w[rw];
         while (availR) {
           const int b = __builtin_ctzll(availR);
           availR &= availR - 1ULL;
-          vis[rw] |= (1ULL << b);
+          vis.w[rw] |= (1ULL << b);
           const int r = (rw << 6) + b;
           if (matchR[r] < 0 || self(self, matchR[r], vis)) {
             matchR[r] = static_cast<int16_t>(u);
@@ -294,10 +290,10 @@ class WalledBranchAndBound {
       return false;
     };
 
-    uint64_t vis[2];
     for (int i = 0; i < activeCount; ++i) {
       if (!unmatchedL[i]) continue;
-      for (int rw = 0; rw < rWords; ++rw) vis[rw] = 0;
+      Bits<kSegWords> vis;
+      vis.clear();
       if (dfs(dfs, i, vis)) {
         ++matched;
         if (matched >= need) return true;
@@ -308,69 +304,52 @@ class WalledBranchAndBound {
     return matched >= need;
   }
 
-  int segmentBound(const Mask& avail) const {
+  int segmentBound(const Bits<W>& avail) const {
     int minAct = 1000000;
     for (int d = 0; d < 4; ++d) {
       const int cnt = segCount[d];
       const int base = segBase[d];
       int act = 0;
       for (int s = 0; s < cnt; ++s) {
-        if (avail.intersects(segMasks[base + s], words)) ++act;
+        if (avail.intersects(segMasks[static_cast<size_t>(base + s)])) ++act;
       }
       if (act < minAct) minAct = act;
     }
     return minAct;
   }
 
-  bool upperBoundOk(const Mask& avail, int need, int minAct) const {
-    if (need <= 0) return true;
-    if (minAct < need) return false;
-    if (minAct == need) return true;
-    if (need >= 2 && cliqueCoverBound(avail) < need) return false;
-    if (need >= 3) {
-      if (segCount[0] <= 128 && segCount[1] <= 128 && !bipartiteCanReach(avail, 0, 1, need)) {
-        return false;
-      }
-      if (segCount[2] <= 128 && segCount[3] <= 128 && !bipartiteCanReach(avail, 2, 3, need)) {
-        return false;
-      }
-    }
-    return true;
-  }
-
-  Mask extractConnectedComponent(const Mask& avail) const {
-    Mask comp;
-    comp.clear(words);
-    const int start = avail.ctz(words);
+  Bits<W> extractConnectedComponent(const Bits<W>& avail) const {
+    Bits<W> comp;
+    comp.clear();
+    const int start = avail.ctz();
     if (start < 0) return comp;
     comp.set(start);
-    Mask frontier = comp;
-    while (frontier.any(words)) {
-      const int u = frontier.ctz(words);
+    Bits<W> frontier = comp;
+    while (frontier.any()) {
+      const int u = frontier.ctz();
       frontier.reset(u);
-      Mask next = avail.bitAnd(adj[u], words);
-      next.andNotEq(comp, words);
-      comp.orEq(next, words);
-      frontier.orEq(next, words);
+      Bits<W> next = (avail & adj[u]).andNot(comp);
+      comp.orEq(next);
+      frontier.orEq(next);
     }
     return comp;
   }
 
-  void recordLocalBoard(int placed) {
+  void recordLocalBoard(int outBase, int placed) {
     if (placed > bestCount) {
       bestCount = placed;
       flatBoards.clear();
     }
     if (placed == bestCount) {
       for (int i = 0; i < placed; ++i) {
-        flatBoards.push_back(curBoard[i]);
+        flatBoards.push_back(curBoard[outBase + i]);
       }
     }
   }
 
-  void emitSubCartesian(int placed, const std::vector<SubResult>& subs, size_t idx) {
+  void emitSubCartesian(int outBase, int placed, const std::vector<SubResult>& subs, size_t idx) {
     if (idx == subs.size()) {
-      recordLocalBoard(placed);
+      recordLocalBoard(outBase, placed);
       return;
     }
     const SubResult& sr = subs[idx];
@@ -378,21 +357,20 @@ class WalledBranchAndBound {
     const size_t cnt = sr.flatBoards.size() / static_cast<size_t>(k);
     for (size_t b = 0; b < cnt; ++b) {
       const uint8_t* ptr = sr.flatBoards.data() + b * static_cast<size_t>(k);
-      for (int j = 0; j < k; ++j) curBoard[placed + j] = ptr[j];
-      emitSubCartesian(placed + k, subs, idx + 1);
+      for (int j = 0; j < k; ++j) curBoard[outBase + placed + j] = ptr[j];
+      emitSubCartesian(outBase, placed + k, subs, idx + 1);
     }
   }
 
-  SubResult solveIsolatedSub(Mask subAvail, int minNeeded) {
+  SubResult solveIsolatedSub(const Bits<W>& subAvail, int minNeeded, int newOutBase) {
     const int savedBest = bestCount;
     std::vector<uint8_t> savedBoards = std::move(flatBoards);
-    uint8_t savedCur[256];
-    for (int i = 0; i < m; ++i) savedCur[i] = curBoard[i];
 
     const int lb = greedyLowerBound(subAvail);
     bestCount = (minNeeded > lb) ? minNeeded : lb;
     flatBoards.clear();
-    search(subAvail, 0, true);
+
+    search(subAvail, 0, newOutBase, true);
 
     SubResult res;
     res.optCount = bestCount;
@@ -400,34 +378,45 @@ class WalledBranchAndBound {
 
     bestCount = savedBest;
     flatBoards = std::move(savedBoards);
-    for (int i = 0; i < m; ++i) curBoard[i] = savedCur[i];
     return res;
   }
 
-  void search(Mask avail, int placed, bool allowSplit) {
+  void search(Bits<W> avail, int placed, int outBase, bool allowSplit) {
     while (true) {
-      Mask it = avail;
-      while (it.any(words)) {
-        const int u = it.ctz(words);
+      Bits<W> it = avail;
+      while (it.any()) {
+        const int u = it.ctz();
         it.reset(u);
-        if (!avail.intersects(adj[u], words)) {
-          curBoard[placed++] = static_cast<uint8_t>(u);
+        if (!avail.intersects(adj[u])) {
+          curBoard[outBase + placed++] = static_cast<uint8_t>(u);
           avail.reset(u);
         }
       }
 
-      if (!avail.any(words)) {
-        recordLocalBoard(placed);
+      if (!avail.any()) {
+        recordLocalBoard(outBase, placed);
         return;
       }
 
       const int need = bestCount - placed;
 
+      if (need == 1 && cliqueCoverBound(avail, 2) == 1) {
+        Bits<W> leafIt = avail;
+        while (leafIt.any()) {
+          const int u = leafIt.ctz();
+          leafIt.reset(u);
+          curBoard[outBase + placed] = static_cast<uint8_t>(u);
+          recordLocalBoard(outBase, placed + 1);
+        }
+        return;
+      }
+
       int bestDim = 0;
       int minAct = 1000000;
       int bestMinSz = 1000;
+      int bestSingleSeg = -1;
+      int bestTieCnt = 0;
       int act[4] = {0, 0, 0, 0};
-      int minSzDim[4] = {1000, 1000, 1000, 1000};
       bool zeroSlackUnit = false;
       int unitCell = -1;
 
@@ -436,147 +425,160 @@ class WalledBranchAndBound {
         const int base = segBase[d];
         int a = 0;
         int bestSz = 1000;
-        int bestSeg = -1;
+        int firstSeg = -1;
+        int tieCnt = 0;
         for (int s = 0; s < cnt; ++s) {
-          const Mask hit = avail.bitAnd(segMasks[base + s], words);
-          const int sz = hit.count(words);
+          const Bits<W> hit = avail & segMasks[static_cast<size_t>(base + s)];
+          const int sz = hit.count();
           if (sz == 0) continue;
           ++a;
           if (sz < bestSz) {
             bestSz = sz;
-            bestSeg = s;
+            firstSeg = s;
+            tieCnt = 1;
+          } else if (sz == bestSz) {
+            ++tieCnt;
           }
         }
         if (a < need) return;
         act[d] = a;
-        minSzDim[d] = bestSz;
         if (a == need && bestSz == 1) {
           zeroSlackUnit = true;
-          unitCell = avail.bitAnd(segMasks[base + bestSeg], words).ctz(words);
+          unitCell = (avail & segMasks[static_cast<size_t>(base + firstSeg)]).ctz();
           break;
         }
         if (a < minAct || (a == minAct && bestSz < bestMinSz)) {
           minAct = a;
           bestMinSz = bestSz;
           bestDim = d;
+          bestSingleSeg = firstSeg;
+          bestTieCnt = tieCnt;
         }
       }
 
       if (zeroSlackUnit) {
-        curBoard[placed++] = static_cast<uint8_t>(unitCell);
-        avail.andNotEq(adj[unitCell], words);
+        curBoard[outBase + placed++] = static_cast<uint8_t>(unitCell);
+        avail.andNotEq(adj[unitCell]);
         avail.reset(unitCell);
         continue;
       }
 
-      if (!upperBoundOk(avail, need, minAct)) return;
+      if (minAct > need) {
+        if (need >= 2 && cliqueCoverBound(avail, need) < need) return;
+        if (need >= 3) {
+          if (act[0] <= need + 2 && act[1] <= need + 2 && !bipartiteCanReach(avail, 0, 1, need)) {
+            return;
+          }
+          if (act[2] <= need + 2 && act[3] <= need + 2 && !bipartiteCanReach(avail, 2, 3, need)) {
+            return;
+          }
+        }
 
-      if (allowSplit && avail.count(words) >= 12) {
-        const Mask firstComp = extractConnectedComponent(avail);
-        if (!firstComp.equals(avail, words)) {
-          std::vector<Mask> parts;
-          std::vector<int> partUbs;
-          Mask rem = avail;
-          int ubSum = 0;
-          while (rem.any(words)) {
-            const Mask c = (parts.empty()) ? firstComp : extractConnectedComponent(rem);
-            rem.andNotEq(c, words);
-            int ub = segmentBound(c);
-            if (ub >= 2) {
-              const int cc = cliqueCoverBound(c);
-              if (cc < ub) ub = cc;
+        if (allowSplit && (placed & 3) == 0 && avail.count() >= 12) {
+          const Bits<W> firstComp = extractConnectedComponent(avail);
+          if (!firstComp.equals(avail)) {
+            std::vector<Bits<W>> parts;
+            std::vector<int> partUbs;
+            Bits<W> rem = avail;
+            int ubSum = 0;
+            while (rem.any()) {
+              const Bits<W> c = parts.empty() ? firstComp : extractConnectedComponent(rem);
+              rem.andNotEq(c);
+              int ub = segmentBound(c);
+              if (ub >= 2) {
+                const int cc = cliqueCoverBound(c, ub);
+                if (cc < ub) ub = cc;
+              }
+              parts.push_back(c);
+              partUbs.push_back(ub);
+              ubSum += ub;
             }
-            parts.push_back(c);
-            partUbs.push_back(ub);
-            ubSum += ub;
-          }
-          if (placed + ubSum < bestCount) return;
+            if (placed + ubSum < bestCount) return;
 
-          std::vector<size_t> order(parts.size());
-          for (size_t i = 0; i < order.size(); ++i) order[i] = i;
-          std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
-            return partUbs[a] < partUbs[b];
-          });
+            std::vector<size_t> order(parts.size());
+            for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+            std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+              return partUbs[a] < partUbs[b];
+            });
 
-          std::vector<SubResult> subs;
-          subs.reserve(parts.size());
-          int optSum = 0;
-          int remUb = ubSum;
-          for (size_t idx : order) {
-            remUb -= partUbs[idx];
-            const int subMinNeed = (bestCount - placed) - optSum - remUb;
-            SubResult sr = solveIsolatedSub(parts[idx], subMinNeed);
-            if (sr.flatBoards.empty() || sr.optCount < subMinNeed) return;
-            optSum += sr.optCount;
-            subs.push_back(std::move(sr));
+            std::vector<SubResult> subs;
+            subs.reserve(parts.size());
+            int optSum = 0;
+            int remUb = ubSum;
+            for (size_t idx : order) {
+              remUb -= partUbs[idx];
+              const int subMinNeed = (bestCount - placed) - optSum - remUb;
+              SubResult sr = solveIsolatedSub(parts[idx], subMinNeed, outBase + placed);
+              if (sr.flatBoards.empty() || sr.optCount < subMinNeed) return;
+              optSum += sr.optCount;
+              subs.push_back(std::move(sr));
+            }
+            if (placed + optSum >= bestCount) {
+              emitSubCartesian(outBase, placed, subs, 0);
+            }
+            return;
           }
-          if (placed + optSum >= bestCount) {
-            emitSubCartesian(placed, subs, 0);
-          }
-          return;
         }
       }
 
-      const int cnt = segCount[bestDim];
       const int base = segBase[bestDim];
-      const int targetSz = minSzDim[bestDim];
-      Mask bestHit;
-      bestHit.clear(words);
-      int bestDegSum = -1;
-      for (int s = 0; s < cnt; ++s) {
-        const Mask hit = avail.bitAnd(segMasks[base + s], words);
-        if (hit.count(words) != targetSz) continue;
-        int degSum = 0;
-        Mask hIt = hit;
-        while (hIt.any(words)) {
-          const int u = hIt.ctz(words);
-          hIt.reset(u);
-          degSum += avail.andCount(adj[u], words);
-        }
-        if (degSum > bestDegSum) {
-          bestDegSum = degSum;
-          bestHit = hit;
+      Bits<W> bestHit = avail & segMasks[static_cast<size_t>(base + bestSingleSeg)];
+      if (bestTieCnt > 1) {
+        const int cnt = segCount[bestDim];
+        int bestDegSum = -1;
+        for (int s = 0; s < cnt; ++s) {
+          const Bits<W> hit = avail & segMasks[static_cast<size_t>(base + s)];
+          if (hit.count() != bestMinSz) continue;
+          int degSum = 0;
+          Bits<W> hIt = hit;
+          while (hIt.any()) {
+            const int u = hIt.ctz();
+            hIt.reset(u);
+            degSum += avail.andCount(adj[u]);
+          }
+          if (degSum > bestDegSum) {
+            bestDegSum = degSum;
+            bestHit = hit;
+          }
         }
       }
 
       uint8_t cand[16];
       uint8_t candDeg[16];
       int k = 0;
-      Mask hitIt = bestHit;
-      while (hitIt.any(words)) {
-        const int u = hitIt.ctz(words);
+      Bits<W> hitIt = bestHit;
+      while (hitIt.any()) {
+        const int u = hitIt.ctz();
         hitIt.reset(u);
-        cand[k] = static_cast<uint8_t>(u);
-        candDeg[k] = static_cast<uint8_t>(avail.andCount(adj[u], words));
-        ++k;
+        cand[k++] = static_cast<uint8_t>(u);
       }
-      for (int i = 1; i < k; ++i) {
-        const uint8_t cu = cand[i];
-        const uint8_t cd = candDeg[i];
-        int j = i - 1;
-        while (j >= 0 && candDeg[j] > cd) {
-          cand[j + 1] = cand[j];
-          candDeg[j + 1] = candDeg[j];
-          --j;
+      if (k > 1) {
+        for (int i = 0; i < k; ++i) candDeg[i] = static_cast<uint8_t>(avail.andCount(adj[cand[i]]));
+        for (int i = 1; i < k; ++i) {
+          const uint8_t cu = cand[i];
+          const uint8_t cd = candDeg[i];
+          int j = i - 1;
+          while (j >= 0 && candDeg[j] > cd) {
+            cand[j + 1] = cand[j];
+            candDeg[j + 1] = candDeg[j];
+            --j;
+          }
+          cand[j + 1] = cu;
+          candDeg[j + 1] = cd;
         }
-        cand[j + 1] = cu;
-        candDeg[j + 1] = cd;
       }
 
       for (int i = 0; i < k; ++i) {
         const int u = cand[i];
-        curBoard[placed] = static_cast<uint8_t>(u);
-        Mask nextAvail = avail.andNot(adj[u], words);
+        curBoard[outBase + placed] = static_cast<uint8_t>(u);
+        Bits<W> nextAvail = avail.andNot(adj[u]);
         nextAvail.reset(u);
-        search(nextAvail, placed + 1, allowSplit);
+        search(nextAvail, placed + 1, outBase, allowSplit);
       }
 
       if (act[bestDim] - 1 >= bestCount - placed) {
-        const Mask skipAvail = avail.andNot(bestHit, words);
-        const int skipMinAct = segmentBound(skipAvail);
-        if (upperBoundOk(skipAvail, bestCount - placed, skipMinAct)) {
-          search(skipAvail, placed, allowSplit);
-        }
+        avail.andNotEq(bestHit);
+        continue;
       }
       return;
     }
@@ -584,13 +586,14 @@ class WalledBranchAndBound {
 
   SubResult solve(int compSize, const int* compCells, const std::vector<CellInfo>& cells) {
     buildComponent(compSize, compCells, cells);
-    Mask allAvail;
-    allAvail.clear(words);
+    Bits<W> allAvail;
+    allAvail.clear();
     for (int i = 0; i < m; ++i) allAvail.set(i);
 
     bestCount = greedyLowerBound(allAvail);
     flatBoards.clear();
-    search(allAvail, 0, true);
+
+    search(allAvail, 0, 0, true);
 
     for (uint8_t& id : flatBoards) {
       id = globalIds[id];
@@ -603,6 +606,24 @@ class WalledBranchAndBound {
   }
 };
 
+SubResult solveComponentDispatch(int compSize, const int* compCells,
+                                 const std::vector<CellInfo>& cells) {
+  if (compSize <= 64) {
+    ComponentSolver<1> s;
+    return s.solve(compSize, compCells, cells);
+  }
+  if (compSize <= 128) {
+    ComponentSolver<2> s;
+    return s.solve(compSize, compCells, cells);
+  }
+  if (compSize <= 192) {
+    ComponentSolver<3> s;
+    return s.solve(compSize, compCells, cells);
+  }
+  ComponentSolver<4> s;
+  return s.solve(compSize, compCells, cells);
+}
+
 }
 
 std::vector<std::vector<std::pair<int, int>>> solveWalled(
@@ -610,13 +631,15 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
   std::vector<std::vector<std::pair<int, int>>> solutions;
   if (n <= 0 || n > 16 || static_cast<int>(grid.size()) != n) return solutions;
 
-  std::vector<int> cellId(static_cast<size_t>(n * n), -1);
+  int16_t cellId[256];
+  for (int i = 0; i < n * n; ++i) cellId[i] = -1;
+
   std::vector<CellInfo> cells;
   cells.reserve(static_cast<size_t>(n * n));
   for (int r = 0; r < n; ++r) {
     for (int c = 0; c < n; ++c) {
       if (grid[r][c] != 'W') {
-        cellId[static_cast<size_t>(r * n + c)] = static_cast<int>(cells.size());
+        cellId[r * n + c] = static_cast<int16_t>(cells.size());
         CellInfo info{};
         info.r = static_cast<uint8_t>(r);
         info.c = static_cast<uint8_t>(c);
@@ -636,7 +659,7 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
     for (int r = 0; r < n; ++r) {
       bool inSeg = false;
       for (int c = 0; c < n; ++c) {
-        const int id = cellId[static_cast<size_t>(r * n + c)];
+        const int id = cellId[r * n + c];
         if (id >= 0) {
           if (!inSeg) {
             inSeg = true;
@@ -652,7 +675,7 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
     for (int c = 0; c < n; ++c) {
       bool inSeg = false;
       for (int r = 0; r < n; ++r) {
-        const int id = cellId[static_cast<size_t>(r * n + c)];
+        const int id = cellId[r * n + c];
         if (id >= 0) {
           if (!inSeg) {
             inSeg = true;
@@ -671,7 +694,7 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
       const int rEnd = (diff < 0) ? (n + diff) : n;
       for (int r = rStart; r < rEnd; ++r) {
         const int c = r - diff;
-        const int id = cellId[static_cast<size_t>(r * n + c)];
+        const int id = cellId[r * n + c];
         if (id >= 0) {
           if (!inSeg) {
             inSeg = true;
@@ -690,7 +713,7 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
       const int rEnd = (sum < n) ? (sum + 1) : n;
       for (int r = rStart; r < rEnd; ++r) {
         const int c = sum - r;
-        const int id = cellId[static_cast<size_t>(r * n + c)];
+        const int id = cellId[r * n + c];
         if (id >= 0) {
           if (!inSeg) {
             inSeg = true;
@@ -705,33 +728,39 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
   }
 
   const int gWords = (numFree + 63) >> 6;
-  std::vector<Mask> globalAdj(static_cast<size_t>(numFree));
-  for (int i = 0; i < numFree; ++i) globalAdj[i].clear(gWords);
+  std::vector<uint64_t> globalAdj(static_cast<size_t>(numFree * gWords), 0ULL);
   for (int i = 0; i < numFree; ++i) {
     for (int j = i + 1; j < numFree; ++j) {
       if (cells[i].seg[0] == cells[j].seg[0] ||
           cells[i].seg[1] == cells[j].seg[1] ||
           cells[i].seg[2] == cells[j].seg[2] ||
           cells[i].seg[3] == cells[j].seg[3]) {
-        globalAdj[i].set(j);
-        globalAdj[j].set(i);
+        globalAdj[static_cast<size_t>(i * gWords + (j >> 6))] |= (1ULL << (j & 63));
+        globalAdj[static_cast<size_t>(j * gWords + (i >> 6))] |= (1ULL << (i & 63));
       }
     }
   }
 
-  Mask unvisited;
-  unvisited.clear(gWords);
-  for (int i = 0; i < numFree; ++i) unvisited.set(i);
+  uint64_t unvisited[4] = {0, 0, 0, 0};
+  for (int i = 0; i < numFree; ++i) unvisited[i >> 6] |= (1ULL << (i & 63));
 
   std::vector<std::pair<int, int>> forcedQueens;
   std::vector<SubResult> compResults;
   std::vector<int> compCells;
-  WalledBranchAndBound solver;
 
-  while (unvisited.any(gWords)) {
-    const int start = unvisited.ctz(gWords);
-    unvisited.reset(start);
-    if (!globalAdj[start].any(gWords)) {
+  for (int start = 0; start < numFree; ++start) {
+    if (!((unvisited[start >> 6] >> (start & 63)) & 1ULL)) continue;
+    unvisited[start >> 6] &= ~(1ULL << (start & 63));
+
+    bool hasNeighbor = false;
+    const uint64_t* sRow = globalAdj.data() + start * gWords;
+    for (int w = 0; w < gWords; ++w) {
+      if (sRow[w]) {
+        hasNeighbor = true;
+        break;
+      }
+    }
+    if (!hasNeighbor) {
       forcedQueens.emplace_back(cells[start].r, cells[start].c);
       continue;
     }
@@ -739,15 +768,19 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
     compCells.clear();
     compCells.push_back(start);
     for (size_t head = 0; head < compCells.size(); ++head) {
-      Mask nbrs = unvisited.bitAnd(globalAdj[compCells[head]], gWords);
-      while (nbrs.any(gWords)) {
-        const int v = nbrs.ctz(gWords);
-        nbrs.reset(v);
-        unvisited.reset(v);
-        compCells.push_back(v);
+      const uint64_t* row = globalAdj.data() + compCells[head] * gWords;
+      for (int w = 0; w < gWords; ++w) {
+        uint64_t bits = row[w] & unvisited[w];
+        while (bits) {
+          const int b = __builtin_ctzll(bits);
+          bits &= bits - 1ULL;
+          unvisited[w] &= ~(1ULL << b);
+          compCells.push_back((w << 6) + b);
+        }
       }
     }
-    compResults.push_back(solver.solve(static_cast<int>(compCells.size()), compCells.data(), cells));
+    compResults.push_back(
+        solveComponentDispatch(static_cast<int>(compCells.size()), compCells.data(), cells));
   }
 
   if (compResults.empty()) {
@@ -755,13 +788,15 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
     return solutions;
   }
 
-  if (compResults.size() == 1 && forcedQueens.empty()) {
+  if (compResults.size() == 1) {
     const SubResult& sr = compResults[0];
     const int k = sr.optCount;
     const size_t cnt = sr.flatBoards.size() / static_cast<size_t>(k);
+    const size_t fSz = forcedQueens.size();
     solutions.resize(cnt);
     for (size_t b = 0; b < cnt; ++b) {
-      solutions[b].reserve(static_cast<size_t>(k));
+      solutions[b].reserve(fSz + static_cast<size_t>(k));
+      for (size_t f = 0; f < fSz; ++f) solutions[b].push_back(forcedQueens[f]);
       const uint8_t* ptr = sr.flatBoards.data() + b * static_cast<size_t>(k);
       for (int j = 0; j < k; ++j) {
         const CellInfo& ci = cells[ptr[j]];
