@@ -1,27 +1,25 @@
 #include <cstdint>
-#include <cstring>
 #include <vector>
 
 #include "nqueens.h"
 
 namespace {
 
-// Buffer statis untuk menampung setengah solusi sebelum dicerminkan (0 byte heap selama DFS).
-constexpr size_t kHalfBufBytes = 262144;
-uint8_t g_halfBuf[kHalfBufBytes];
-
 struct CleanNormalSolver {
   int n;
   int lastRow;
   uint32_t fullMask;
   uint8_t pos[32];  // pos[r] = kolom ratu pada baris r
+  uint8_t* halfBuf;
+  size_t halfBufCap;
   size_t halfCount;
   size_t bufUsed;
   std::vector<std::vector<int>>* out;
 
   void savePair() {
-    if (bufUsed + static_cast<size_t>(n) <= kHalfBufBytes) {
-      std::memcpy(g_halfBuf + bufUsed, pos, static_cast<size_t>(n));
+    if (bufUsed + static_cast<size_t>(n) <= halfBufCap) {
+      uint8_t* dst = halfBuf + bufUsed;
+      for (int r = 0; r < n; ++r) dst[r] = pos[r];
       bufUsed += static_cast<size_t>(n);
       ++halfCount;
     } else {
@@ -72,10 +70,17 @@ std::vector<std::vector<int>> solveNQueens(int n) {
   }
   if (n < 4) return solutions;
 
+  // Buffer lokal di stack (bukan variabel global) untuk menampung setengah solusi
+  // sebelum dicerminkan. Cukup hingga N=12 (7.100 * 12 = 85.200 byte < 90.000 byte).
+  constexpr size_t kHalfBufBytes = 90000;
+  uint8_t halfBuf[kHalfBufBytes];
+
   CleanNormalSolver s{};
   s.n = n;
   s.lastRow = n - 1;
   s.fullMask = (n == 32) ? ~0u : ((1u << n) - 1u);
+  s.halfBuf = halfBuf;
+  s.halfBufCap = kHalfBufBytes;
   s.out = &solutions;
 
   const int half = n >> 1;
@@ -117,7 +122,7 @@ std::vector<std::vector<int>> solveNQueens(int n) {
     int s1[32], s2[32];
     const int lastCol = n - 1;
     for (size_t i = 0; i < s.halfCount; ++i) {
-      const uint8_t* src = g_halfBuf + i * static_cast<size_t>(n);
+      const uint8_t* src = halfBuf + i * static_cast<size_t>(n);
       for (int r = 0; r < n; ++r) {
         s1[r] = src[r];
         s2[r] = lastCol - src[r];
