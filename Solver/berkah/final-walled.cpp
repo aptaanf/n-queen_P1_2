@@ -8,131 +8,103 @@
 
 namespace {
 
-// Solver Walled N-Queens (Final - Tim Berkah dunia akhirat / P1-2)
-//
-// Paradigma Algoritma (KOM1303 Analisis Algoritma):
-// 1. Dekomposisi Komponen Terhubung (Graf Konflik Segmen):
-//    - Dinding 'W' membagi setiap baris, kolom, diagonal utama (r-c), dan anti-diagonal (r+c)
-//      menjadi segmen-segmen maksimal sel bebas '.'.
-//    - Dua sel bebas saling menyerang jika dan hanya jika berbagi minimal satu segmen.
-//    - Sel terisolasi (derajat 0) pasti masuk ke setiap solusi optimal; komponen terhubung
-//      lain diselesaikan secara independen lalu digabung via produk Kartesius.
-// 2. Branch & Bound (Pertemuan 11):
-//    - Batas bawah awal (bestCount) dicari dengan heuristik greedy min-degree sebelum B&B
-//      (tanpa menyimpan solusi heuristik agar tidak terjadi duplikasi/kehilangan solusi).
-//    - Fungsi batas atas B(X) yang sound (mengambil minimum dari 3 batas):
-//        (a) 4-Dimension Active Segment Bound: min(#rowSeg, #colSeg, #d1Seg, #d2Seg) aktif.
-//        (b) Extended Segment Clique Cover: partisi klik dari segmen terpanjang + perluasan klik.
-//        (c) Bipartite Matching Bound: maximum matching (rowSeg <-> colSeg) dan (d1Seg <-> d2Seg).
-//    - Pemangkasan aman (sound pruning): pangkas hanya jika placed + UB < bestCount (strict).
-// 3. Complete Search, Backtracking & Greedy MRV (Pertemuan 10 & 11):
-//    - Reduksi sel terisolasi (derajat 0) dan Zero-Slack Unit Propagation (segmen berukuran 1
-//      pada dimensi dengan slack == 0) langsung ditempatkan tanpa percabangan.
-//    - Memilih segmen pada dimensi dengan jumlah segmen aktif paling sedikit (slack terkecil),
-//      lalu memilih segmen dengan kandidat paling sedikit (MRV) dan derajat konflik tertinggi.
-//    - Urutan kandidat diurutkan berdasarkan derajat terkecil agar solusi optimal cepat ditemukan.
-//
-// Optimasi Memori & WASM:
-// - 0 variabel global, 0 static mutable, 0 pre-computing, hanya stdlib C++ dan "nqueens.h".
-// - Representasi bitset kompak 64-bit (1..4 word tergantung ukuran komponen), stack sangat kecil,
-//   0 alokasi std::vector di dalam rekursi pencarian utama.
+struct Mask {
+  uint64_t w[4];
 
-template <int W>
-struct Bits {
-  uint64_t w[W];
-
-  inline void clear() {
-    for (int i = 0; i < W; ++i) w[i] = 0;
+  inline void clear(int words) {
+    for (int i = 0; i < words; ++i) w[i] = 0;
   }
-  inline bool any() const {
+  inline bool any(int words) const {
     uint64_t acc = 0;
-    for (int i = 0; i < W; ++i) acc |= w[i];
+    for (int i = 0; i < words; ++i) acc |= w[i];
     return acc != 0;
   }
-  inline bool test(int i) const { return ((w[i >> 6] >> (i & 63)) & 1ULL) != 0; }
+  inline bool equals(const Mask& o, int words) const {
+    for (int i = 0; i < words; ++i) {
+      if (w[i] != o.w[i]) return false;
+    }
+    return true;
+  }
   inline void set(int i) { w[i >> 6] |= (1ULL << (i & 63)); }
   inline void reset(int i) { w[i >> 6] &= ~(1ULL << (i & 63)); }
-  inline int count() const {
+  inline int count(int words) const {
     int s = 0;
-    for (int i = 0; i < W; ++i) s += __builtin_popcountll(w[i]);
+    for (int i = 0; i < words; ++i) s += __builtin_popcountll(w[i]);
     return s;
   }
-  inline int ctz() const {
-    for (int i = 0; i < W; ++i) {
+  inline int ctz(int words) const {
+    for (int i = 0; i < words; ++i) {
       if (w[i]) return (i << 6) + __builtin_ctzll(w[i]);
     }
     return -1;
   }
-  inline bool intersects(const Bits& o) const {
-    for (int i = 0; i < W; ++i)
+  inline bool intersects(const Mask& o, int words) const {
+    for (int i = 0; i < words; ++i) {
       if (w[i] & o.w[i]) return true;
+    }
     return false;
   }
-  inline int andCount(const Bits& o) const {
+  inline int andCount(const Mask& o, int words) const {
     int s = 0;
-    for (int i = 0; i < W; ++i) s += __builtin_popcountll(w[i] & o.w[i]);
+    for (int i = 0; i < words; ++i) s += __builtin_popcountll(w[i] & o.w[i]);
     return s;
   }
-  inline Bits operator&(const Bits& o) const {
-    Bits r;
-    for (int i = 0; i < W; ++i) r.w[i] = w[i] & o.w[i];
+  inline Mask bitAnd(const Mask& o, int words) const {
+    Mask r;
+    for (int i = 0; i < words; ++i) r.w[i] = w[i] & o.w[i];
     return r;
   }
-  inline Bits andNot(const Bits& o) const {
-    Bits r;
-    for (int i = 0; i < W; ++i) r.w[i] = w[i] & ~o.w[i];
+  inline Mask andNot(const Mask& o, int words) const {
+    Mask r;
+    for (int i = 0; i < words; ++i) r.w[i] = w[i] & ~o.w[i];
     return r;
   }
-  inline void orEq(const Bits& o) {
-    for (int i = 0; i < W; ++i) w[i] |= o.w[i];
+  inline void orEq(const Mask& o, int words) {
+    for (int i = 0; i < words; ++i) w[i] |= o.w[i];
   }
-  inline void andEq(const Bits& o) {
-    for (int i = 0; i < W; ++i) w[i] &= o.w[i];
+  inline void andEq(const Mask& o, int words) {
+    for (int i = 0; i < words; ++i) w[i] &= o.w[i];
   }
-  inline void andNotEq(const Bits& o) {
-    for (int i = 0; i < W; ++i) w[i] &= ~o.w[i];
+  inline void andNotEq(const Mask& o, int words) {
+    for (int i = 0; i < words; ++i) w[i] &= ~o.w[i];
   }
 };
 
 struct CellInfo {
   uint8_t r;
   uint8_t c;
-  uint16_t seg[4];  // 0: row, 1: col, 2: d1 (r-c), 3: d2 (r+c)
+  uint16_t seg[4];
 };
 
-struct CompResult {
+struct SubResult {
   int optCount = 0;
-  std::vector<uint8_t> flatBoards;  // setiap papan berukuran optCount (ID sel global)
+  std::vector<uint8_t> flatBoards;
 };
 
-template <int W>
-class ComponentSolver {
+class WalledBranchAndBound {
  public:
-  static constexpr int kMaxCells = W * 64;
-  // Jumlah segmen per dimensi di dalam komponen berukuran <= kMaxCells tidak melebihi kMaxCells.
-  static constexpr int kSegWords = (W <= 3) ? W : 3;
-
   int m = 0;
-  const uint8_t* globalIds = nullptr;
-  Bits<W> adj[kMaxCells];
-  uint16_t cellSeg[kMaxCells][4];
-
+  int words = 1;
+  std::vector<Mask> adj;
+  std::vector<uint16_t> cellSeg;
+  std::vector<Mask> segMasks;
+  std::vector<uint8_t> globalIds;
   int segCount[4] = {0, 0, 0, 0};
   int segBase[4] = {0, 0, 0, 0};
-  int totalSegs = 0;
-  std::vector<Bits<W>> segMasks;
 
   int bestCount = 0;
   std::vector<uint8_t> flatBoards;
-  uint8_t curBoard[kMaxCells];
+  uint8_t curBoard[256];
 
-  void init(int compSize, const int* compCells, const std::vector<CellInfo>& globalInfo) {
+  void buildComponent(int compSize, const int* compCells, const std::vector<CellInfo>& cells) {
     m = compSize;
-    for (int i = 0; i < m; ++i) adj[i].clear();
+    words = (m + 63) >> 6;
+    globalIds.resize(static_cast<size_t>(m));
+    for (int i = 0; i < m; ++i) globalIds[i] = static_cast<uint8_t>(compCells[i]);
 
     int maxGlobalSeg = 0;
     for (int i = 0; i < m; ++i) {
-      const CellInfo& ci = globalInfo[compCells[i]];
+      const CellInfo& ci = cells[compCells[i]];
       for (int d = 0; d < 4; ++d) {
         if (static_cast<int>(ci.seg[d]) + 1 > maxGlobalSeg) {
           maxGlobalSeg = static_cast<int>(ci.seg[d]) + 1;
@@ -141,53 +113,57 @@ class ComponentSolver {
     }
 
     std::vector<int> segMap(static_cast<size_t>(maxGlobalSeg), -1);
-    totalSegs = 0;
+    cellSeg.resize(static_cast<size_t>(m) * 4);
+    int totalSegs = 0;
+
     for (int d = 0; d < 4; ++d) {
       segBase[d] = totalSegs;
       std::fill(segMap.begin(), segMap.end(), -1);
       int localCnt = 0;
       for (int i = 0; i < m; ++i) {
-        const int gSeg = globalInfo[compCells[i]].seg[d];
+        const int gSeg = cells[compCells[i]].seg[d];
         if (segMap[gSeg] < 0) segMap[gSeg] = localCnt++;
-        cellSeg[i][d] = static_cast<uint16_t>(segMap[gSeg]);
+        cellSeg[static_cast<size_t>(i) * 4 + d] = static_cast<uint16_t>(segMap[gSeg]);
       }
       segCount[d] = localCnt;
       totalSegs += localCnt;
     }
 
-    segMasks.assign(static_cast<size_t>(totalSegs), Bits<W>{});
-    for (int s = 0; s < totalSegs; ++s) segMasks[s].clear();
+    segMasks.resize(static_cast<size_t>(totalSegs));
+    for (int s = 0; s < totalSegs; ++s) segMasks[s].clear(words);
     for (int i = 0; i < m; ++i) {
       for (int d = 0; d < 4; ++d) {
-        segMasks[static_cast<size_t>(segBase[d] + cellSeg[i][d])].set(i);
+        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d];
+        segMasks[sIdx].set(i);
       }
     }
 
+    adj.resize(static_cast<size_t>(m));
     for (int i = 0; i < m; ++i) {
-      Bits<W> mask;
-      mask.clear();
+      Mask mask;
+      mask.clear(words);
       for (int d = 0; d < 4; ++d) {
-        mask.orEq(segMasks[static_cast<size_t>(segBase[d] + cellSeg[i][d])]);
+        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(i) * 4 + d];
+        mask.orEq(segMasks[sIdx], words);
       }
       mask.reset(i);
       adj[i] = mask;
     }
   }
 
-  // Bangun batas bawah awal via greedy min-degree (tanpa menyimpan ke flatBoards).
-  int greedyLowerBound(Bits<W> avail) const {
+  int greedyLowerBound(Mask avail) const {
     int best = 0;
     for (int mode = 0; mode < 2; ++mode) {
-      Bits<W> rem = avail;
+      Mask rem = avail;
       int cnt = 0;
-      while (rem.any()) {
+      while (rem.any(words)) {
         int pick = -1;
         int bestScore = 1000000;
-        Bits<W> it = rem;
-        while (it.any()) {
-          const int u = it.ctz();
+        Mask it = rem;
+        while (it.any(words)) {
+          const int u = it.ctz(words);
           it.reset(u);
-          const int deg = rem.andCount(adj[u]);
+          const int deg = rem.andCount(adj[u], words);
           const int score = (mode == 0) ? deg : (deg * 256 - u);
           if (score < bestScore) {
             bestScore = score;
@@ -196,7 +172,7 @@ class ComponentSolver {
           }
         }
         ++cnt;
-        rem.andNotEq(adj[pick]);
+        rem.andNotEq(adj[pick], words);
         rem.reset(pick);
       }
       if (cnt > best) best = cnt;
@@ -204,58 +180,59 @@ class ComponentSolver {
     return best;
   }
 
-  // Batas atas (b): Extended Segment Clique Cover pada sel tersisa.
-  int cliqueCoverBound(Bits<W> rem) const {
+  int cliqueCoverBound(Mask rem) const {
     int cliques = 0;
-    while (rem.any()) {
+    while (rem.any(words)) {
       ++cliques;
-      const int u = rem.ctz();
-      Bits<W> bestSeg;
+      const int u = rem.ctz(words);
+      Mask bestSeg;
       int bestSize = 0;
       for (int d = 0; d < 4; ++d) {
-        const Bits<W> hit = rem & segMasks[static_cast<size_t>(segBase[d] + cellSeg[u][d])];
-        const int sz = hit.count();
+        const int sIdx = segBase[d] + cellSeg[static_cast<size_t>(u) * 4 + d];
+        const Mask hit = rem.bitAnd(segMasks[sIdx], words);
+        const int sz = hit.count(words);
         if (sz > bestSize) {
           bestSize = sz;
           bestSeg = hit;
         }
       }
-      Bits<W> common = rem.andNot(bestSeg);
-      Bits<W> memb = bestSeg;
-      while (memb.any() && common.any()) {
-        const int v = memb.ctz();
+      Mask common = rem.andNot(bestSeg, words);
+      Mask memb = bestSeg;
+      while (memb.any(words) && common.any(words)) {
+        const int v = memb.ctz(words);
         memb.reset(v);
-        common.andEq(adj[v]);
+        common.andEq(adj[v], words);
       }
-      while (common.any()) {
-        const int w = common.ctz();
+      while (common.any(words)) {
+        const int w = common.ctz(words);
         common.reset(w);
         bestSeg.set(w);
-        common.andEq(adj[w]);
+        common.andEq(adj[w], words);
       }
-      rem.andNotEq(bestSeg);
+      rem.andNotEq(bestSeg, words);
     }
     return cliques;
   }
 
-  // Batas atas (c): Maximum Bipartite Matching antara dimensi dL dan dR.
-  bool bipartiteCanReach(const Bits<W>& avail, int dL, int dR, int need) const {
+  bool bipartiteCanReach(const Mask& avail, int dL, int dR, int need) const {
     const int nL = segCount[dL];
     const int nR = segCount[dR];
     if (need <= 0) return true;
     if (nL < need || nR < need) return false;
 
-    Bits<kSegWords> lAdj[kMaxCells];
-    int16_t lToIdx[kMaxCells];
-    int16_t matchR[kMaxCells];
-    uint8_t unmatchedL[kMaxCells];
+    const int rWords = (nR + 63) >> 6;
+    uint64_t lAdj[144 * 3];
+    int16_t lToIdx[144];
+    int16_t matchR[144];
+    uint8_t unmatchedL[144];
 
     int activeCount = 0;
     const int baseL = segBase[dL];
     for (int l = 0; l < nL; ++l) {
-      if (avail.intersects(segMasks[static_cast<size_t>(baseL + l)])) {
+      if (avail.intersects(segMasks[baseL + l], words)) {
         lToIdx[l] = static_cast<int16_t>(activeCount);
-        lAdj[activeCount].clear();
+        uint64_t* row = lAdj + activeCount * rWords;
+        for (int rw = 0; rw < rWords; ++rw) row[rw] = 0;
         ++activeCount;
       } else {
         lToIdx[l] = -1;
@@ -263,12 +240,13 @@ class ComponentSolver {
     }
     if (activeCount < need) return false;
 
-    Bits<W> it = avail;
-    while (it.any()) {
-      const int u = it.ctz();
+    Mask it = avail;
+    while (it.any(words)) {
+      const int u = it.ctz(words);
       it.reset(u);
-      const int idx = lToIdx[cellSeg[u][dL]];
-      lAdj[idx].set(cellSeg[u][dR]);
+      const int idx = lToIdx[cellSeg[static_cast<size_t>(u) * 4 + dL]];
+      const int rSeg = cellSeg[static_cast<size_t>(u) * 4 + dR];
+      lAdj[idx * rWords + (rSeg >> 6)] |= (1ULL << (rSeg & 63));
     }
 
     for (int r = 0; r < nR; ++r) matchR[r] = -1;
@@ -276,16 +254,17 @@ class ComponentSolver {
     int matched = 0;
     for (int i = 0; i < activeCount; ++i) {
       unmatchedL[i] = 1;
-      for (int w = 0; w < kSegWords; ++w) {
-        uint64_t bits = lAdj[i].w[w];
+      const uint64_t* row = lAdj + i * rWords;
+      for (int rw = 0; rw < rWords; ++rw) {
+        uint64_t bits = row[rw];
         while (bits) {
           const int b = __builtin_ctzll(bits);
-          const int r = (w << 6) + b;
+          const int r = (rw << 6) + b;
           if (matchR[r] < 0) {
             matchR[r] = static_cast<int16_t>(i);
             unmatchedL[i] = 0;
             ++matched;
-            w = kSegWords;
+            rw = rWords;
             break;
           }
           bits &= bits - 1ULL;
@@ -297,14 +276,15 @@ class ComponentSolver {
     int remLeft = activeCount - matched;
     if (matched + remLeft < need) return false;
 
-    auto dfs = [&](auto& self, int u, Bits<kSegWords>& vis) -> bool {
-      for (int w = 0; w < kSegWords; ++w) {
-        uint64_t availR = lAdj[u].w[w] & ~vis.w[w];
+    auto dfs = [&](auto& self, int u, uint64_t* vis) -> bool {
+      const uint64_t* row = lAdj + u * rWords;
+      for (int rw = 0; rw < rWords; ++rw) {
+        uint64_t availR = row[rw] & ~vis[rw];
         while (availR) {
           const int b = __builtin_ctzll(availR);
           availR &= availR - 1ULL;
-          vis.w[w] |= (1ULL << b);
-          const int r = (w << 6) + b;
+          vis[rw] |= (1ULL << b);
+          const int r = (rw << 6) + b;
           if (matchR[r] < 0 || self(self, matchR[r], vis)) {
             matchR[r] = static_cast<int16_t>(u);
             return true;
@@ -314,10 +294,10 @@ class ComponentSolver {
       return false;
     };
 
+    uint64_t vis[3];
     for (int i = 0; i < activeCount; ++i) {
       if (!unmatchedL[i]) continue;
-      Bits<kSegWords> vis;
-      vis.clear();
+      for (int rw = 0; rw < rWords; ++rw) vis[rw] = 0;
       if (dfs(dfs, i, vis)) {
         ++matched;
         if (matched >= need) return true;
@@ -328,7 +308,55 @@ class ComponentSolver {
     return matched >= need;
   }
 
-  inline void recordBoard(int placed) {
+  int segmentBound(const Mask& avail) const {
+    int minAct = 1000000;
+    for (int d = 0; d < 4; ++d) {
+      const int cnt = segCount[d];
+      const int base = segBase[d];
+      int act = 0;
+      for (int s = 0; s < cnt; ++s) {
+        if (avail.intersects(segMasks[base + s], words)) ++act;
+      }
+      if (act < minAct) minAct = act;
+    }
+    return minAct;
+  }
+
+  bool upperBoundOk(const Mask& avail, int need, int minAct) const {
+    if (need <= 0) return true;
+    if (minAct < need) return false;
+    if (minAct == need) return true;
+    if (need >= 2 && cliqueCoverBound(avail) < need) return false;
+    if (need >= 3) {
+      if (segCount[0] <= 144 && segCount[1] <= 144 && !bipartiteCanReach(avail, 0, 1, need)) {
+        return false;
+      }
+      if (segCount[2] <= 144 && segCount[3] <= 144 && !bipartiteCanReach(avail, 2, 3, need)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Mask extractConnectedComponent(const Mask& avail) const {
+    Mask comp;
+    comp.clear(words);
+    const int start = avail.ctz(words);
+    if (start < 0) return comp;
+    comp.set(start);
+    Mask frontier = comp;
+    while (frontier.any(words)) {
+      const int u = frontier.ctz(words);
+      frontier.reset(u);
+      Mask next = avail.bitAnd(adj[u], words);
+      next.andNotEq(comp, words);
+      comp.orEq(next, words);
+      frontier.orEq(next, words);
+    }
+    return comp;
+  }
+
+  void recordBoard(int placed) {
     if (placed > bestCount) {
       bestCount = placed;
       flatBoards.clear();
@@ -340,58 +368,66 @@ class ComponentSolver {
     }
   }
 
-  // Evaluasi cepat batas atas tanpa memilih segmen cabang (dipakai untuk cabang skip).
-  bool quickUpperOk(const Bits<W>& avail, int need) const {
-    if (need <= 0) return true;
-    int act[4];
-    for (int d = 0; d < 4; ++d) {
-      const int cnt = segCount[d];
-      const int base = segBase[d];
-      int a = 0;
-      for (int s = 0; s < cnt; ++s) {
-        if (avail.intersects(segMasks[static_cast<size_t>(base + s)])) ++a;
-      }
-      if (a < need) return false;
-      act[d] = a;
+  void emitSubCartesian(int placed, const std::vector<SubResult>& subs, size_t idx) {
+    if (idx == subs.size()) {
+      recordBoard(placed);
+      return;
     }
-    if (need >= 2 && cliqueCoverBound(avail) < need) return false;
-    if (need >= 3) {
-      if (act[0] <= need + 2 && act[1] <= need + 2 && !bipartiteCanReach(avail, 0, 1, need)) {
-        return false;
-      }
-      if (act[2] <= need + 2 && act[3] <= need + 2 && !bipartiteCanReach(avail, 2, 3, need)) {
-        return false;
-      }
+    const SubResult& sr = subs[idx];
+    const int k = sr.optCount;
+    const size_t cnt = sr.flatBoards.size() / static_cast<size_t>(k);
+    for (size_t b = 0; b < cnt; ++b) {
+      const uint8_t* ptr = sr.flatBoards.data() + b * static_cast<size_t>(k);
+      for (int j = 0; j < k; ++j) curBoard[placed + j] = ptr[j];
+      emitSubCartesian(placed + k, subs, idx + 1);
     }
-    return true;
   }
 
-  void search(Bits<W> avail, int placed) {
+  SubResult solveIsolatedSub(Mask subAvail, int minNeeded) {
+    const int savedBest = bestCount;
+    std::vector<uint8_t> savedBoards = std::move(flatBoards);
+    uint8_t savedCur[256];
+    for (int i = 0; i < m; ++i) savedCur[i] = curBoard[i];
+
+    int lb = greedyLowerBound(subAvail);
+    bestCount = (minNeeded > lb) ? minNeeded : lb;
+    flatBoards.clear();
+    search(subAvail, 0, true);
+
+    SubResult res;
+    res.optCount = bestCount;
+    res.flatBoards = std::move(flatBoards);
+
+    bestCount = savedBest;
+    flatBoards = std::move(savedBoards);
+    for (int i = 0; i < m; ++i) curBoard[i] = savedCur[i];
+    return res;
+  }
+
+  void search(Mask avail, int placed, bool allowSplit) {
     while (true) {
-      // 1. Reduksi sel terisolasi (derajat 0 pada avail): wajib dipilih tanpa percabangan.
-      Bits<W> it = avail;
-      while (it.any()) {
-        const int u = it.ctz();
+      Mask it = avail;
+      while (it.any(words)) {
+        const int u = it.ctz(words);
         it.reset(u);
-        if (!avail.intersects(adj[u])) {
+        if (!avail.intersects(adj[u], words)) {
           curBoard[placed++] = static_cast<uint8_t>(u);
           avail.reset(u);
         }
       }
 
-      if (!avail.any()) {
+      if (!avail.any(words)) {
         recordBoard(placed);
         return;
       }
 
       const int need = bestCount - placed;
 
-      // 2. Hitung batas segmen 4 arah & cari dimensi paling ketat + segmen MRV.
-      int minDimCnt = 1000000;
       int bestDim = 0;
+      int minAct = 1000000;
+      int bestMinSz = 1000;
       int act[4] = {0, 0, 0, 0};
-      int minSegSize[4] = {1000, 1000, 1000, 1000};
-      Bits<W> bestHitPerDim[4];
+      int minSzDim[4] = {1000, 1000, 1000, 1000};
       bool zeroSlackUnit = false;
       int unitCell = -1;
 
@@ -400,87 +436,118 @@ class ComponentSolver {
         const int base = segBase[d];
         int a = 0;
         int bestSz = 1000;
-        Bits<W> bestHit;
+        int bestSeg = -1;
         for (int s = 0; s < cnt; ++s) {
-          const Bits<W> hit = avail & segMasks[static_cast<size_t>(base + s)];
-          const int sz = hit.count();
+          const Mask hit = avail.bitAnd(segMasks[base + s], words);
+          const int sz = hit.count(words);
           if (sz == 0) continue;
           ++a;
           if (sz < bestSz) {
             bestSz = sz;
-            bestHit = hit;
+            bestSeg = s;
           }
         }
-        if (a < need) return;  // Bound 1: pangkas
+        if (a < need) return;
         act[d] = a;
-        minSegSize[d] = bestSz;
-        bestHitPerDim[d] = bestHit;
+        minSzDim[d] = bestSz;
         if (a == need && bestSz == 1) {
           zeroSlackUnit = true;
-          unitCell = bestHit.ctz();
+          unitCell = avail.bitAnd(segMasks[base + bestSeg], words).ctz(words);
           break;
         }
-        if (a < minDimCnt || (a == minDimCnt && bestSz < minSegSize[bestDim])) {
-          minDimCnt = a;
+        if (a < minAct || (a == minAct && bestSz < bestMinSz)) {
+          minAct = a;
+          bestMinSz = bestSz;
           bestDim = d;
         }
       }
 
-      // Zero-Slack Unit Propagation: jika dimensi tanpa slack memiliki segmen berukuran 1,
-      // sel tersebut wajib ditempatkan langsung tanpa percabangan maupun pengecekan mahal.
       if (zeroSlackUnit) {
         curBoard[placed++] = static_cast<uint8_t>(unitCell);
-        avail.andNotEq(adj[unitCell]);
+        avail.andNotEq(adj[unitCell], words);
         avail.reset(unitCell);
         continue;
       }
 
-      // 3. Cek batas atas lanjutan hanya bila belum dipangkas oleh segmen.
-      if (need >= 2 && cliqueCoverBound(avail) < need) return;
-      if (need >= 3) {
-        if (act[0] <= need + 2 && act[1] <= need + 2 && !bipartiteCanReach(avail, 0, 1, need)) {
-          return;
-        }
-        if (act[2] <= need + 2 && act[3] <= need + 2 && !bipartiteCanReach(avail, 2, 3, need)) {
+      if (!upperBoundOk(avail, need, minAct)) return;
+
+      if (allowSplit && avail.count(words) >= 12) {
+        const Mask firstComp = extractConnectedComponent(avail);
+        if (!firstComp.equals(avail, words)) {
+          std::vector<Mask> parts;
+          std::vector<int> partUbs;
+          Mask rem = avail;
+          int ubSum = 0;
+          while (rem.any(words)) {
+            const Mask c = (parts.empty()) ? firstComp : extractConnectedComponent(rem);
+            rem.andNotEq(c, words);
+            int ub = segmentBound(c);
+            if (ub >= 2) {
+              const int cc = cliqueCoverBound(c);
+              if (cc < ub) ub = cc;
+            }
+            parts.push_back(c);
+            partUbs.push_back(ub);
+            ubSum += ub;
+          }
+          if (placed + ubSum < bestCount) return;
+
+          std::vector<size_t> order(parts.size());
+          for (size_t i = 0; i < order.size(); ++i) order[i] = i;
+          std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            return partUbs[a] < partUbs[b];
+          });
+
+          std::vector<SubResult> subs;
+          subs.reserve(parts.size());
+          int optSum = 0;
+          int remUb = ubSum;
+          for (size_t idx : order) {
+            remUb -= partUbs[idx];
+            const int subMinNeed = (bestCount - placed) - optSum - remUb;
+            SubResult sr = solveIsolatedSub(parts[idx], subMinNeed);
+            if (sr.flatBoards.empty() || sr.optCount < subMinNeed) return;
+            optSum += sr.optCount;
+            subs.push_back(std::move(sr));
+          }
+          if (placed + optSum >= bestCount) {
+            emitSubCartesian(placed, subs, 0);
+          }
           return;
         }
       }
 
-      // 4. Tie-break MRV di dalam bestDim menggunakan Degree Heuristic bila ada beberapa segmen
-      //    dengan ukuran minimum yang sama.
-      const int targetSz = minSegSize[bestDim];
-      Bits<W> bestHit = bestHitPerDim[bestDim];
-      if (targetSz >= 1) {
-        const int cnt = segCount[bestDim];
-        const int base = segBase[bestDim];
-        int bestDegSum = -1;
-        for (int s = 0; s < cnt; ++s) {
-          const Bits<W> hit = avail & segMasks[static_cast<size_t>(base + s)];
-          if (hit.count() != targetSz) continue;
-          int degSum = 0;
-          Bits<W> hIt = hit;
-          while (hIt.any()) {
-            const int u = hIt.ctz();
-            hIt.reset(u);
-            degSum += avail.andCount(adj[u]);
-          }
-          if (degSum > bestDegSum) {
-            bestDegSum = degSum;
-            bestHit = hit;
-          }
+      const int cnt = segCount[bestDim];
+      const int base = segBase[bestDim];
+      const int targetSz = minSzDim[bestDim];
+      Mask bestHit;
+      bestHit.clear(words);
+      int bestDegSum = -1;
+      for (int s = 0; s < cnt; ++s) {
+        const Mask hit = avail.bitAnd(segMasks[base + s], words);
+        if (hit.count(words) != targetSz) continue;
+        int degSum = 0;
+        Mask hIt = hit;
+        while (hIt.any(words)) {
+          const int u = hIt.ctz(words);
+          hIt.reset(u);
+          degSum += avail.andCount(adj[u], words);
+        }
+        if (degSum > bestDegSum) {
+          bestDegSum = degSum;
+          bestHit = hit;
         }
       }
 
-      // 5. Urutkan kandidat pada segmen terpilih berdasarkan derajat konflik terkecil.
       uint8_t cand[16];
       uint8_t candDeg[16];
       int k = 0;
-      Bits<W> hitIt = bestHit;
-      while (hitIt.any()) {
-        const int u = hitIt.ctz();
+      Mask hitIt = bestHit;
+      while (hitIt.any(words)) {
+        const int u = hitIt.ctz(words);
         hitIt.reset(u);
         cand[k] = static_cast<uint8_t>(u);
-        candDeg[k] = static_cast<uint8_t>(avail.andCount(adj[u]));
+        candDeg[k] = static_cast<uint8_t>(avail.andCount(adj[u], words));
         ++k;
       }
       for (int i = 1; i < k; ++i) {
@@ -496,63 +563,41 @@ class ComponentSolver {
         candDeg[j + 1] = cd;
       }
 
-      // Cabang 1..k: tempatkan ratu pada salah satu sel di segmen terpilih.
       for (int i = 0; i < k; ++i) {
         const int u = cand[i];
         curBoard[placed] = static_cast<uint8_t>(u);
-        Bits<W> nextAvail = avail.andNot(adj[u]);
+        Mask nextAvail = avail.andNot(adj[u], words);
         nextAvail.reset(u);
-        search(nextAvail, placed + 1);
+        search(nextAvail, placed + 1, allowSplit);
       }
 
-      // Cabang skip: hanya dieksplorasi jika tanpa segmen ini masih bisa mencapai bestCount.
       if (act[bestDim] - 1 >= bestCount - placed) {
-        const Bits<W> skipAvail = avail.andNot(bestHit);
-        if (quickUpperOk(skipAvail, bestCount - placed)) {
-          search(skipAvail, placed);
+        const Mask skipAvail = avail.andNot(bestHit, words);
+        const int skipMinAct = segmentBound(skipAvail);
+        if (upperBoundOk(skipAvail, bestCount - placed, skipMinAct)) {
+          search(skipAvail, placed, allowSplit);
         }
       }
       return;
     }
   }
 
-  CompResult solve(int compSize, const int* compCells, const uint8_t* gIds,
-                   const std::vector<CellInfo>& globalInfo) {
-    globalIds = gIds;
-    init(compSize, compCells, globalInfo);
-
-    Bits<W> allAvail;
-    allAvail.clear();
+  SubResult solve(int compSize, const int* compCells, const std::vector<CellInfo>& cells) {
+    buildComponent(compSize, compCells, cells);
+    Mask allAvail;
+    allAvail.clear(words);
     for (int i = 0; i < m; ++i) allAvail.set(i);
 
     bestCount = greedyLowerBound(allAvail);
     flatBoards.clear();
-    search(allAvail, 0);
+    search(allAvail, 0, true);
 
-    CompResult res;
+    SubResult res;
     res.optCount = bestCount;
     res.flatBoards = std::move(flatBoards);
     return res;
   }
 };
-
-CompResult solveComponentDispatch(int compSize, const int* compCells, const uint8_t* gIds,
-                                  const std::vector<CellInfo>& globalInfo) {
-  if (compSize <= 64) {
-    ComponentSolver<1> s;
-    return s.solve(compSize, compCells, gIds, globalInfo);
-  }
-  if (compSize <= 128) {
-    ComponentSolver<2> s;
-    return s.solve(compSize, compCells, gIds, globalInfo);
-  }
-  if (compSize <= 192) {
-    ComponentSolver<3> s;
-    return s.solve(compSize, compCells, gIds, globalInfo);
-  }
-  ComponentSolver<4> s;
-  return s.solve(compSize, compCells, gIds, globalInfo);
-}
 
 }  // namespace
 
@@ -561,7 +606,6 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
   std::vector<std::vector<std::pair<int, int>>> solutions;
   if (n <= 0 || n > 16 || static_cast<int>(grid.size()) != n) return solutions;
 
-  // 1. Kumpulkan seluruh sel bebas '.'
   std::vector<int> cellId(static_cast<size_t>(n * n), -1);
   std::vector<CellInfo> cells;
   cells.reserve(static_cast<size_t>(n * n));
@@ -579,11 +623,10 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
 
   const int numFree = static_cast<int>(cells.size());
   if (numFree == 0) {
-    solutions.emplace_back();  // 1 papan kosong dengan 0 ratu
+    solutions.emplace_back();
     return solutions;
   }
 
-  // 2. Bangun segmen maksimal pada 4 arah (Row, Col, D1, D2).
   {
     int seg = 0;
     for (int r = 0; r < n; ++r) {
@@ -657,58 +700,70 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
     }
   }
 
-  // 3. Bangun daftar ketetanggaan graf konflik & dekomposisi komponen terhubung.
-  std::vector<std::vector<int>> adjList(static_cast<size_t>(numFree));
+  const int gWords = (numFree + 63) >> 6;
+  std::vector<Mask> globalAdj(static_cast<size_t>(numFree));
+  for (int i = 0; i < numFree; ++i) globalAdj[i].clear(gWords);
   for (int i = 0; i < numFree; ++i) {
     for (int j = i + 1; j < numFree; ++j) {
       if (cells[i].seg[0] == cells[j].seg[0] ||
           cells[i].seg[1] == cells[j].seg[1] ||
           cells[i].seg[2] == cells[j].seg[2] ||
           cells[i].seg[3] == cells[j].seg[3]) {
-        adjList[i].push_back(j);
-        adjList[j].push_back(i);
+        globalAdj[i].set(j);
+        globalAdj[j].set(i);
       }
     }
   }
 
-  std::vector<uint8_t> visited(static_cast<size_t>(numFree), 0);
-  std::vector<std::pair<int, int>> forcedQueens;
-  std::vector<CompResult> compResults;
+  Mask unvisited;
+  unvisited.clear(gWords);
+  for (int i = 0; i < numFree; ++i) unvisited.set(i);
 
-  std::vector<int> bfsQueue;
-  std::vector<uint8_t> compGlobalIds;
-  for (int i = 0; i < numFree; ++i) {
-    if (visited[i]) continue;
-    visited[i] = 1;
-    if (adjList[i].empty()) {
-      forcedQueens.emplace_back(cells[i].r, cells[i].c);
+  std::vector<std::pair<int, int>> forcedQueens;
+  std::vector<SubResult> compResults;
+  std::vector<int> compCells;
+  WalledBranchAndBound solver;
+
+  while (unvisited.any(gWords)) {
+    const int start = unvisited.ctz(gWords);
+    unvisited.reset(start);
+    if (!globalAdj[start].any(gWords)) {
+      forcedQueens.emplace_back(cells[start].r, cells[start].c);
       continue;
     }
 
-    bfsQueue.clear();
-    bfsQueue.push_back(i);
-    for (size_t head = 0; head < bfsQueue.size(); ++head) {
-      const int u = bfsQueue[head];
-      for (int v : adjList[u]) {
-        if (!visited[v]) {
-          visited[v] = 1;
-          bfsQueue.push_back(v);
-        }
+    compCells.clear();
+    compCells.push_back(start);
+    for (size_t head = 0; head < compCells.size(); ++head) {
+      Mask nbrs = unvisited.bitAnd(globalAdj[compCells[head]], gWords);
+      while (nbrs.any(gWords)) {
+        const int v = nbrs.ctz(gWords);
+        nbrs.reset(v);
+        unvisited.reset(v);
+        compCells.push_back(v);
       }
     }
-
-    const int compSize = static_cast<int>(bfsQueue.size());
-    compGlobalIds.resize(static_cast<size_t>(compSize));
-    for (int k = 0; k < compSize; ++k) {
-      compGlobalIds[k] = static_cast<uint8_t>(bfsQueue[k]);
-    }
-    compResults.push_back(
-        solveComponentDispatch(compSize, bfsQueue.data(), compGlobalIds.data(), cells));
+    compResults.push_back(solver.solve(static_cast<int>(compCells.size()), compCells.data(), cells));
   }
 
-  // 4. Gabungkan hasil semua komponen via produk Kartesius.
   if (compResults.empty()) {
     solutions.push_back(std::move(forcedQueens));
+    return solutions;
+  }
+
+  if (compResults.size() == 1 && forcedQueens.empty()) {
+    const SubResult& sr = compResults[0];
+    const int k = sr.optCount;
+    const size_t cnt = sr.flatBoards.size() / static_cast<size_t>(k);
+    solutions.resize(cnt);
+    for (size_t b = 0; b < cnt; ++b) {
+      solutions[b].reserve(static_cast<size_t>(k));
+      const uint8_t* ptr = sr.flatBoards.data() + b * static_cast<size_t>(k);
+      for (int j = 0; j < k; ++j) {
+        const CellInfo& ci = cells[ptr[j]];
+        solutions[b].emplace_back(ci.r, ci.c);
+      }
+    }
     return solutions;
   }
 
@@ -729,7 +784,7 @@ std::vector<std::vector<std::pair<int, int>>> solveWalled(
       solutions.push_back(current);
       return;
     }
-    const CompResult& cr = compResults[idx];
+    const SubResult& cr = compResults[idx];
     const int k = cr.optCount;
     const size_t cnt = cr.flatBoards.size() / static_cast<size_t>(k);
     const size_t baseLen = current.size();
