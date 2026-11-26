@@ -221,10 +221,10 @@ class WalledBranchAndBound {
     if (nL < need || nR < need) return false;
 
     const int rWords = (nR + 63) >> 6;
-    uint64_t lAdj[144 * 3];
-    int16_t lToIdx[144];
-    int16_t matchR[144];
-    uint8_t unmatchedL[144];
+    uint64_t lAdj[128 * 2];
+    int16_t lToIdx[128];
+    int16_t matchR[128];
+    uint8_t unmatchedL[128];
 
     int activeCount = 0;
     const int baseL = segBase[dL];
@@ -294,7 +294,7 @@ class WalledBranchAndBound {
       return false;
     };
 
-    uint64_t vis[3];
+    uint64_t vis[2];
     for (int i = 0; i < activeCount; ++i) {
       if (!unmatchedL[i]) continue;
       for (int rw = 0; rw < rWords; ++rw) vis[rw] = 0;
@@ -328,10 +328,10 @@ class WalledBranchAndBound {
     if (minAct == need) return true;
     if (need >= 2 && cliqueCoverBound(avail) < need) return false;
     if (need >= 3) {
-      if (segCount[0] <= 144 && segCount[1] <= 144 && !bipartiteCanReach(avail, 0, 1, need)) {
+      if (segCount[0] <= 128 && segCount[1] <= 128 && !bipartiteCanReach(avail, 0, 1, need)) {
         return false;
       }
-      if (segCount[2] <= 144 && segCount[3] <= 144 && !bipartiteCanReach(avail, 2, 3, need)) {
+      if (segCount[2] <= 128 && segCount[3] <= 128 && !bipartiteCanReach(avail, 2, 3, need)) {
         return false;
       }
     }
@@ -356,21 +356,21 @@ class WalledBranchAndBound {
     return comp;
   }
 
-  void recordBoard(int placed) {
+  void recordLocalBoard(int placed) {
     if (placed > bestCount) {
       bestCount = placed;
       flatBoards.clear();
     }
     if (placed == bestCount) {
       for (int i = 0; i < placed; ++i) {
-        flatBoards.push_back(globalIds[curBoard[i]]);
+        flatBoards.push_back(curBoard[i]);
       }
     }
   }
 
   void emitSubCartesian(int placed, const std::vector<SubResult>& subs, size_t idx) {
     if (idx == subs.size()) {
-      recordBoard(placed);
+      recordLocalBoard(placed);
       return;
     }
     const SubResult& sr = subs[idx];
@@ -389,7 +389,7 @@ class WalledBranchAndBound {
     uint8_t savedCur[256];
     for (int i = 0; i < m; ++i) savedCur[i] = curBoard[i];
 
-    int lb = greedyLowerBound(subAvail);
+    const int lb = greedyLowerBound(subAvail);
     bestCount = (minNeeded > lb) ? minNeeded : lb;
     flatBoards.clear();
     search(subAvail, 0, true);
@@ -417,7 +417,7 @@ class WalledBranchAndBound {
       }
 
       if (!avail.any(words)) {
-        recordBoard(placed);
+        recordLocalBoard(placed);
         return;
       }
 
@@ -592,6 +592,10 @@ class WalledBranchAndBound {
     flatBoards.clear();
     search(allAvail, 0, true);
 
+    for (uint8_t& id : flatBoards) {
+      id = globalIds[id];
+    }
+
     SubResult res;
     res.optCount = bestCount;
     res.flatBoards = std::move(flatBoards);
@@ -599,7 +603,7 @@ class WalledBranchAndBound {
   }
 };
 
-}  // namespace
+}
 
 std::vector<std::vector<std::pair<int, int>>> solveWalled(
     int n, const std::vector<std::string>& grid) {
