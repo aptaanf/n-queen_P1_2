@@ -13,8 +13,6 @@ void search(int n, int row, Mask lockedRows, Mask columns, Mask downLeft, Mask d
             const std::array<Mask, maxBoardSize>& allowed,
             std::array<int, maxBoardSize>& board,
             std::vector<std::vector<int>>& solutions) {
-  // allowed already accounts for every locked queen's attacks.
-  // Advance the diagonals of newly placed queens across each skipped row.
   while (row < n && (lockedRows & (Mask{1} << row)) != 0) {
     ++row;
     downLeft >>= 1;
@@ -38,13 +36,12 @@ void search(int n, int row, Mask lockedRows, Mask columns, Mask downLeft, Mask d
   }
 }
 
-}  // namespace
+}
 
 std::vector<std::vector<int>> solvePreplaced(
     int n, const std::vector<std::pair<int, int>>& preplaced) {
   if (n < 4 || n > maxBoardSize) return {};
 
-  // The contest bounds N, so search state can live in fixed-size buffers.
   std::array<int, maxBoardSize> board;
   board.fill(-1);
   const Mask fullRow = (Mask{1} << n) - 1;
@@ -53,7 +50,6 @@ std::vector<std::vector<int>> solvePreplaced(
 
   Mask lockedRows = 0;
 
-  // Apply locked queens before searching, including attacks on earlier rows.
   for (const auto& [row, column] : preplaced) {
     const Mask queen = Mask{1} << column;
     if (board[row] != -1 || (allowed[row] & queen) == 0) return {};
