@@ -1,14 +1,10 @@
 // Environment-neutral solver runner: no DOM, no `self`. The browser worker and the Node bench both wrap this, so a
 // benchmark and a real run measure the same code path.
 //
-// One run: load the module, hand it the problem, run the solver's function, pack what it returned, and check it. Every run does all of it
-// the same way, so that a program cannot tell a run that is timed from one that is checked.
-//
-// Timed: the call of the solver's function, and nothing else. A program has no code that runs outside it: the rules (checked when it is
-// compiled, driver/scripts/check-rules.mjs) forbid global variables and redefining what the tester uses too, such as operator new.
-// Not timed: loading the module, handing over the problem, packing the result, measuring the memory (memory-probe.ts) and checking.
+// One run: load the module, hand it the problem, time the solver's function, then pack and check what it returned.
+// Only the call to nq_solve is timed. Passing the problem, packing the result and checking it are the tester's work.
+// timeSolver is the same run without the packing and checking, for the repeated runs that only measure.
 import { findDuplicates, firstInvalid } from "../Board/solution-check";
-import { MemoryProbe, newPass, type MemoryPass, type MemoryUse } from "./memory-probe";
 import { indexSet, type SolutionSet } from "../Board/solution-set";
 import {
   CASE_ID,
@@ -30,17 +26,10 @@ export interface SolverModule {
   _nq_result(): number;
   _nq_count(): number;
   _nq_bad(which: number): number;
-  /** This and wasmMemory are missing in a module built before the memory was measured from outside it. */
-  _nq_stack_top?(): number;
-  wasmMemory?: WebAssembly.Memory;
+  /** Missing in a module built before the heap was measured. */
+  _nq_heap_top?(): number;
   /** A getter in Emscripten: the view is replaced when memory grows, so read it again after every call. */
   readonly HEAPU8: Uint8Array;
-}
-
-/** What the host does while a module is being loaded. Emscripten calls these as `preRun` and `onRuntimeInitialized`. */
-export interface LoadHooks {
-  /** The module is instantiated and none of its code has run. */
-  preRun(mod: SolverModule): void;
 }
 
 export interface RunOptions {
@@ -49,8 +38,8 @@ export interface RunOptions {
   debug: boolean;
   snapshotHead: number;
   snapshotTail: number;
-  /** Instantiates the WASM module, calling the hooks. Excluded from compute time. */
-  loadModule: (hooks: LoadHooks) => Promise<SolverModule>;
+  /** Instantiates the WASM module. Excluded from compute time. */
+  loadModule: () => Promise<SolverModule>;
   /** Receives the messages of a run in progress: started, snapshots and solved. */
   emit: (msg: RunProgress) => void;
   /** Milliseconds, with sub-millisecond resolution. */
@@ -59,10 +48,6 @@ export interface RunOptions {
   hostTarget?: object;
   /** How often snapshots are sent to the main thread while the solver runs. */
   flushMs?: number;
-  /** The pattern of this run and the bytes found written by the run it is paired with. Default: a pass of its own. */
-  memory?: MemoryPass;
-  /** The result bytes of an earlier run on this problem that were checked and found right: the same bytes are not checked again. */
-  expected?: Uint8Array;
 }
 
 const defaultNow = (): number => performance.now();
@@ -85,77 +70,133 @@ const emptySet = (n: number, kind: SolutionSet["kind"]): SolutionSet => ({
 });
 
 type Failure = Extract<RunOutcome, { status: "error" }>;
-type Ran =
-  | { ok: true; mod: SolverModule; computeMs: number; packed: number; memory?: MemoryUse }
+type Solved =
+  | { ok: true; mod: SolverModule; computeMs: number; heapPeakBytes?: number }
   | { ok: false; failure: Failure };
 
+type SolveOptions = Pick<RunOptions, "input" | "debug" | "loadModule" | "emit" | "now">;
+
+const heapTop = (mod: SolverModule): number | undefined =>
+  typeof mod._nq_heap_top === "function" ? mod._nq_heap_top() : undefined;
+
 /**
- * Loads a fresh module, hands it the problem, runs the solver's function, which alone is timed, and packs what it returned. The memory is
- * looked at after the function and again after the packing, which writes the result: those bytes are the tester's. `extra` adds what a
- * failure should carry besides its message, such as the snapshots.
+ * Loads a fresh module, hands it the problem and times the solver's function. The heap is read after the problem went
+ * in and again right after the solver returned, before anything is packed: packing allocates too, and that is the
+ * tester's memory. `extra` adds what a failure should carry besides its message, such as the snapshots seen so far.
  */
-async function execute(opts: RunOptions, extra: () => { snapshots?: SnapshotState }): Promise<Ran> {
+async function solveOnce(opts: SolveOptions, extra: () => { snapshots?: SnapshotState }): Promise<Solved> {
   const { input, debug, emit } = opts;
   const now = opts.now ?? defaultNow;
-  const probe = new MemoryProbe(opts.memory ?? newPass(), now);
-  const failed = (kind: ErrorKind, message: string, computeMs: number, stack?: string): Ran => ({
-    ok: false,
-    failure: { status: "error", kind, message, ...(stack ? { stack } : {}), computeMs, ...extra() },
-  });
 
   let mod: SolverModule;
   try {
-    mod = await opts.loadModule({
-      preRun: (m) => {
-        probe.attach(m);
-      },
-    });
+    mod = await opts.loadModule();
   } catch (e) {
-    return failed("load", messageOf(e), 0, stackOf(e));
+    return {
+      ok: false,
+      failure: { status: "error", kind: "load", message: messageOf(e), stack: stackOf(e), computeMs: 0 },
+    };
   }
 
   const bytes = encodeInput(input);
+  let heapBefore: number | undefined;
   try {
     const at = mod._nq_alloc_input(bytes.length);
     mod.HEAPU8.set(bytes, at);
-    if (mod._nq_prepare(CASE_ID[input.kase], debug ? 1 : 0) !== 0) return failed("trap", "The problem could not be passed to the solver.", 0);
+    if (mod._nq_prepare(CASE_ID[input.kase], debug ? 1 : 0) !== 0) {
+      return {
+        ok: false,
+        failure: {
+          status: "error",
+          kind: "trap",
+          message: "The problem could not be passed to the solver.",
+          computeMs: 0,
+        },
+      };
+    }
+    heapBefore = heapTop(mod);
   } catch (e) {
-    return failed(classify(e), messageOf(e), 0, stackOf(e));
+    return {
+      ok: false,
+      failure: { status: "error", kind: classify(e), message: messageOf(e), stack: stackOf(e), computeMs: 0 },
+    };
   }
 
-  probe.takePaintMs(); // memory that grew while the problem went in is not the solve's
   emit({ type: "started" });
-  let thrown: { error: unknown } | undefined;
+  let failure: unknown;
   let code = 0;
   const t0 = now();
   try {
     code = mod._nq_solve();
-  } catch (error) {
-    thrown = { error };
-  }
-  // Filling grown memory with the pattern is the tester's work, and is taken off.
-  const computeMs = Math.max(0, now() - t0 - probe.takePaintMs());
-  emit({ type: "solved", computeMs });
-  if (thrown) return failed(classify(thrown.error), messageOf(thrown.error), computeMs, stackOf(thrown.error));
-  if (code === 1) return failed("missing", `The solver does not define ${ENTRY_POINT[input.kase]}`, computeMs);
-  if (code !== 0) return failed("trap", `The solver call ended with code ${code}.`, computeMs);
-
-  let packed: number;
-  try {
-    probe.mark();
-    packed = mod._nq_pack();
   } catch (e) {
-    return failed(classify(e), messageOf(e), computeMs, stackOf(e));
+    failure = e;
+  }
+  const computeMs = now() - t0;
+  emit({ type: "solved", computeMs });
+
+  if (failure !== undefined) {
+    return {
+      ok: false,
+      failure: {
+        status: "error",
+        kind: classify(failure),
+        message: messageOf(failure),
+        stack: stackOf(failure),
+        computeMs,
+        ...extra(),
+      },
+    };
+  }
+  if (code === 1) {
+    return {
+      ok: false,
+      failure: {
+        status: "error",
+        kind: "missing",
+        message: `The solver does not define ${ENTRY_POINT[input.kase]}`,
+        computeMs,
+        ...extra(),
+      },
+    };
+  }
+  if (code !== 0) {
+    return {
+      ok: false,
+      failure: {
+        status: "error",
+        kind: "trap",
+        message: `The solver call ended with code ${code}.`,
+        computeMs,
+        ...extra(),
+      },
+    };
   }
 
-  const result = packed > 0 ? mod._nq_result() : 0;
-  probe.mark(packed > 0 ? [result, result + packed] : undefined);
-  if (probe.grewByItself) return failed("trap", "The program grew its memory by itself, so its memory cannot be measured.", computeMs);
-  const memory = probe.use();
-  return { ok: true, mod, computeMs, packed, ...(memory ? { memory } : {}) };
+  const heapAfter = heapTop(mod);
+  return {
+    ok: true,
+    mod,
+    computeMs,
+    ...(heapBefore !== undefined && heapAfter !== undefined
+      ? { heapPeakBytes: Math.max(0, heapAfter - heapBefore) }
+      : {}),
+  };
 }
 
-const sameBytes = (a: Uint8Array, b: Uint8Array): boolean => a.length === b.length && a.every((v, i) => v === b[i]);
+/** One run that only measures: what a repeated run needs, without packing or checking the result. */
+export type TimedOutcome = { status: "timed"; computeMs: number; heapPeakBytes?: number } | Failure;
+
+export async function timeSolver(
+  opts: Pick<RunOptions, "input" | "loadModule" | "emit" | "now">,
+): Promise<TimedOutcome> {
+  const solved = await solveOnce({ ...opts, debug: false }, () => ({}));
+  if (!solved.ok) return solved.failure;
+  return {
+    status: "timed",
+    computeMs: solved.computeMs,
+    ...(solved.heapPeakBytes !== undefined ? { heapPeakBytes: solved.heapPeakBytes } : {}),
+  };
+}
 
 export async function runSolver(opts: RunOptions): Promise<RunOutcome> {
   const { input, debug, emit } = opts;
@@ -185,12 +226,18 @@ export async function runSolver(opts: RunOptions): Promise<RunOutcome> {
   };
 
   try {
-    const ran = await execute(opts, snapshotsNow);
-    if (!ran.ok) return ran.failure;
-    const { mod, computeMs, packed, memory } = ran;
+    const solved = await solveOnce(opts, snapshotsNow);
+    if (!solved.ok) return solved.failure;
+    const { mod, computeMs, heapPeakBytes } = solved;
 
-    // Check. Not compute time, and the watchdog no longer applies.
-    const common = { computeMs, ...(memory ? { memory } : {}) };
+    // Pack and check. Not compute time, and the watchdog no longer applies.
+    let packed: number;
+    try {
+      packed = mod._nq_pack();
+    } catch (e) {
+      return { status: "error", kind: classify(e), message: messageOf(e), stack: stackOf(e), computeMs, ...snapshotsNow() };
+    }
+    const common = { computeMs, ...(heapPeakBytes !== undefined ? { heapPeakBytes } : {}) };
     if (packed < 0) {
       return {
         status: "completed",
@@ -210,9 +257,6 @@ export async function runSolver(opts: RunOptions): Promise<RunOutcome> {
     };
     if (kind === "cells") indexSet(set);
 
-    if (opts.expected && sameBytes(opts.expected, set.data)) {
-      return { status: "completed", ...common, set, duplicates: { count: 0 }, ...snapshotsNow() };
-    }
     const invalid = firstInvalid(set, { preplaced: input.preplaced, terrain: input.terrain });
     return {
       status: "completed",
