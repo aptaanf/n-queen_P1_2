@@ -2,367 +2,185 @@
 #include <cstdint>
 #include <cstring>
 #include <vector>
-
 #include "nqueens.h"
 
 namespace {
 
-// Solver Normal N-Queens (Final - Tim Berkah dunia akhirat / P1-2)
-//
-// Paradigma Algoritma (KOM1303 Analisis Algoritma):
-// 1. Complete Search & Backtracking (Pertemuan 11):
-//    - Bitmask uint32_t untuk domain kolom sah tiap baris (pengecekan constraint O(1)).
-//    - Soundness of Pruning (Forward Checking):
-//        (a) Row Wipeout: pangkas segera bila ada baris sisa berdomain kosong.
-//        (b) Column Wipeout: pangkas segera bila gabungan domain baris sisa != kolom sisa.
-//        (c) Inline Unit Propagation: baris dengan tepat 1 kandidat langsung ditempatkan
-//            di dalam loop tanpa percabangan rekursif.
-// 2. Heuristik Greedy MRV + Degree Heuristic (Pertemuan 10) di dalam Backtracking:
-//    - Memilih baris sisa dengan jumlah kandidat kolom paling sedikit (MRV).
-//    - Tie-breaking berbasis Degree Heuristic (jarak ke tengah papan) tanpa tabel ekstra.
-// 3. Symmetry Breaking Grup Dihedral D4 (8-fold: rotasi 0/90/180/270 + refleksi):
-//    - Kasus 1: ratu di sudut (0, 0), pecah simetri transpos (kolom 1 pada baris >= c1).
-//    - Kasus 2: tanpa ratu sudut, jarak minimum ke sudut adalah c0 (1 <= c0 <= (N-2)/2),
-//      membatasi posisi ratu pada tepi bawah, kiri, dan kanan papan.
-//
-// Optimasi Memori (Target #1 Lightest & #1 Fastest):
-// - 0 byte buffer antara (tanpa fundBuf) & 0 byte tabel serangan (tanpa safe[][][]).
-// - Domain lokal compact uint16_t curDom[12] (24 byte/level) & 2 array stack kecil (int s[N], t[N])
-//   saat emisi langsung ke std::vector<std::vector<int>> (total stack tertulis ~2-3 KB untuk N=4..12).
-// - 0 variabel global, 0 static mutable, 0 pre-computing, hanya stdlib C++ dan "nqueens.h".
-
-__attribute__((always_inline)) inline void pushReserved(
-    std::vector<std::vector<int>>& dst, const int* p, int n) {
-  if (dst.size() == dst.capacity()) __builtin_unreachable();
-  dst.emplace_back(p, p + n);
-}
+struct BufState {
+  uint32_t bits[12];
+  size_t count, used, total;
+  uint8_t* buf;
+};
 
 template <int N>
-__attribute__((noinline)) void emitDirectFixed(
-    std::vector<std::vector<int>>& dst, const uint8_t* raw, uint8_t mask) {
-  constexpr int last = N - 1;
-  int s[N];
-  int t[N];
-
-  if (__builtin_expect(mask == 0xFFu, 1)) {
-    if (__builtin_expect(dst.size() + 8 > dst.capacity(), 0)) {
-      const size_t nextCap = dst.capacity() ? dst.capacity() * 2 : 16;
-      dst.reserve(nextCap < dst.size() + 8 ? dst.size() + 8 : nextCap);
+__attribute__((noinline)) void emitBatch(std::vector<std::vector<int>>& dst, const uint8_t* __restrict buf, size_t count) {
+  const int last = N - 1;
+  for (size_t i = 0; i < count; ++i) {
+    const uint8_t mask = buf[i * (N + 1)];
+    const uint8_t* __restrict raw = buf + i * (N + 1) + 1;
+    int s0[N], s1[N], s2[N], s3[N], s4[N], s5[N], s6[N], s7[N];
+#pragma clang loop unroll(full)
+    for (int r = 0; r < N; ++r) {
+      const int br = raw[r];
+      s0[r] = br; s1[r] = last - br; s2[last - r] = br; s3[last - r] = last - br; s4[br] = r;
     }
 #pragma clang loop unroll(full)
     for (int r = 0; r < N; ++r) {
-      const int c = raw[r];
-      s[r] = c;
-      t[c] = r;
+      const int tr = s4[r];
+      s5[r] = last - tr; s6[last - r] = tr; s7[last - r] = last - tr;
     }
-    pushReserved(dst, s, N);  // s0: identitas
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[r] = last - raw[r];
-    pushReserved(dst, s, N);  // s1: refleksi horizontal
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[last - r] = raw[r];
-    pushReserved(dst, s, N);  // s2: refleksi vertikal
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[last - r] = last - raw[r];
-    pushReserved(dst, s, N);  // s3: rotasi 180
-
-    pushReserved(dst, t, N);  // s4: transpos (diagonal utama)
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[r] = last - t[r];
-    pushReserved(dst, s, N);  // s5: rotasi 90 CCW
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[last - r] = t[r];
-    pushReserved(dst, s, N);  // s6: rotasi 90 CW
-
-#pragma clang loop unroll(full)
-    for (int r = 0; r < N; ++r) s[last - r] = last - t[r];
-    pushReserved(dst, s, N);  // s7: refleksi anti-diagonal
-    return;
+    int* ps[8] = {s0, s1, s2, s3, s4, s5, s6, s7};
+    if (__builtin_expect(mask == 0xFFu, 1)) {
+      for (int k = 0; k < 8; ++k) { if (dst.size() == dst.capacity()) __builtin_unreachable(); dst.emplace_back(ps[k], ps[k] + N); }
+    } else {
+      for (int k = 0; k < 8; ++k) if (mask & (1u << k)) dst.emplace_back(ps[k], ps[k] + N);
+    }
   }
-
-  for (int r = 0; r < N; ++r) t[raw[r]] = r;
-  if (mask & 0x01u) { for (int r = 0; r < N; ++r) s[r] = raw[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x02u) { for (int r = 0; r < N; ++r) s[r] = last - raw[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x04u) { for (int r = 0; r < N; ++r) s[last - r] = raw[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x08u) { for (int r = 0; r < N; ++r) s[last - r] = last - raw[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x10u) dst.emplace_back(t, t + N);
-  if (mask & 0x20u) { for (int r = 0; r < N; ++r) s[r] = last - t[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x40u) { for (int r = 0; r < N; ++r) s[last - r] = t[r]; dst.emplace_back(s, s + N); }
-  if (mask & 0x80u) { for (int r = 0; r < N; ++r) s[last - r] = last - t[r]; dst.emplace_back(s, s + N); }
 }
 
-__attribute__((noinline)) void emitDirectGeneric(
-    std::vector<std::vector<int>>& dst, const uint8_t* raw, int n, uint8_t mask) {
-  const int last = n - 1;
-  int s[12];
-  int t[12];
-  for (int r = 0; r < n; ++r) t[raw[r]] = r;
-  if (mask & 0x01u) { for (int r = 0; r < n; ++r) s[r] = raw[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x02u) { for (int r = 0; r < n; ++r) s[r] = last - raw[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x04u) { for (int r = 0; r < n; ++r) s[last - r] = raw[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x08u) { for (int r = 0; r < n; ++r) s[last - r] = last - raw[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x10u) dst.emplace_back(t, t + n);
-  if (mask & 0x20u) { for (int r = 0; r < n; ++r) s[r] = last - t[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x40u) { for (int r = 0; r < n; ++r) s[last - r] = t[r]; dst.emplace_back(s, s + n); }
-  if (mask & 0x80u) { for (int r = 0; r < n; ++r) s[last - r] = last - t[r]; dst.emplace_back(s, s + n); }
+template <int N>
+void saveRec(BufState& st, const uint8_t* b, uint8_t mask, size_t cnt) {
+  st.buf[st.used] = mask;
+  std::memcpy(st.buf + st.used + 1, b, static_cast<size_t>(N));
+  st.used += N + 1;
+  ++st.count;
+  st.total += cnt;
 }
 
-struct D4MrvSolver {
-  int n;
-  int last;
-  int curC0;
-  bool curCase1;
-  uint32_t fullMask;
-  uint8_t pos[12];  // pos[baris] = kolom ratu
-  std::vector<std::vector<int>>* out;
+template <int N>
+__attribute__((noinline)) void record1(BufState& st) {
+  uint8_t b[N], t[N];
+  for (int r = 0; r < N; ++r) { b[r] = static_cast<uint8_t>(__builtin_ctz(st.bits[r])); t[b[r]] = static_cast<uint8_t>(r); }
+  const int cmp = std::memcmp(b, t, static_cast<size_t>(N));
+  if (cmp <= 0) saveRec<N>(st, b, (cmp == 0) ? 0x0Fu : 0xFFu, (cmp == 0) ? 4u : 8u);
+}
 
-  inline void emit(uint8_t mask) const {
-    if (n == 12) emitDirectFixed<12>(*out, pos, mask);
-    else if (n == 11) emitDirectFixed<11>(*out, pos, mask);
-    else if (n == 10) emitDirectFixed<10>(*out, pos, mask);
-    else emitDirectGeneric(*out, pos, n, mask);
-  }
-
-  // Filter kanonik Kasus 1 (ratu di sudut (0, 0)): pecah simetri transpos.
-  __attribute__((noinline)) void recordCase1() const {
-    uint8_t t[12];
-    for (int r = 0; r < n; ++r) t[pos[r]] = static_cast<uint8_t>(r);
-    const int cmp = std::memcmp(pos, t, static_cast<size_t>(n));
-    if (cmp > 0) return;
-    emit((cmp == 0) ? 0x0Fu : 0xFFu);
-  }
-
-  // Filter kanonik Kasus 2 (tanpa ratu sudut, jarak tepi minimum c0).
-  __attribute__((noinline)) void recordCase2() const {
-    const int c0 = curC0;
-    if (pos[c0] != static_cast<uint8_t>(last) &&
-        pos[last - c0] != 0u &&
-        pos[last] != static_cast<uint8_t>(last - c0)) {
-      emit(0xFFu);
-      return;
+template <int N, int C0>
+__attribute__((noinline)) void record2(BufState& st) {
+  const int last = N - 1;
+  uint8_t b[N], mask = 0xFFu;
+  size_t cnt = 8u;
+  for (int r = 0; r < N; ++r) b[r] = static_cast<uint8_t>(__builtin_ctz(st.bits[r]));
+  if (b[C0] == static_cast<uint8_t>(last) || b[last - C0] == 0u || b[last] == static_cast<uint8_t>(last - C0)) {
+    uint8_t t[N], sym[8][N];
+    for (int r = 0; r < N; ++r) t[b[r]] = static_cast<uint8_t>(r);
+    for (int r = 0; r < N; ++r) {
+      const uint8_t br = b[r], tr = t[r];
+      sym[0][r] = br; sym[1][r] = static_cast<uint8_t>(last - br); sym[2][last - r] = br; sym[3][last - r] = static_cast<uint8_t>(last - br);
+      sym[4][r] = tr; sym[5][r] = static_cast<uint8_t>(last - tr); sym[6][last - r] = tr; sym[7][last - r] = static_cast<uint8_t>(last - tr);
     }
-
-    uint8_t t[12];
-    for (int r = 0; r < n; ++r) t[pos[r]] = static_cast<uint8_t>(r);
-    uint8_t sym[8][12];
-    for (int r = 0; r < n; ++r) {
-      const uint8_t br = pos[r], tr = t[r];
-      sym[0][r] = br;
-      sym[1][r] = static_cast<uint8_t>(last - br);
-      sym[2][last - r] = br;
-      sym[3][last - r] = static_cast<uint8_t>(last - br);
-      sym[4][r] = tr;
-      sym[5][r] = static_cast<uint8_t>(last - tr);
-      sym[6][last - r] = tr;
-      sym[7][last - r] = static_cast<uint8_t>(last - tr);
-    }
-
-    const uint8_t c0u = static_cast<uint8_t>(c0);
-    if (sym[3][0] == c0u && std::memcmp(sym[3], sym[0], static_cast<size_t>(n)) < 0) return;
-    if (sym[5][0] == c0u && std::memcmp(sym[5], sym[0], static_cast<size_t>(n)) < 0) return;
-    if (sym[6][0] == c0u && std::memcmp(sym[6], sym[0], static_cast<size_t>(n)) < 0) return;
-
-    uint8_t mask = 1u;
+    const uint8_t c0u = static_cast<uint8_t>(C0);
+    if ((sym[3][0] == c0u && std::memcmp(sym[3], sym[0], static_cast<size_t>(N)) < 0) ||
+        (sym[5][0] == c0u && std::memcmp(sym[5], sym[0], static_cast<size_t>(N)) < 0) ||
+        (sym[6][0] == c0u && std::memcmp(sym[6], sym[0], static_cast<size_t>(N)) < 0)) return;
+    mask = 1u; cnt = 1u;
     for (int k = 1; k < 8; ++k) {
       bool dup = false;
-      for (int j = 0; j < k; ++j) {
-        if ((mask & (1u << j)) && std::memcmp(sym[k], sym[j], static_cast<size_t>(n)) == 0) {
-          dup = true;
-          break;
-        }
-      }
-      if (!dup) mask |= static_cast<uint8_t>(1u << k);
-    }
-    emit(mask);
-  }
-
-  inline void record() const {
-    if (curCase1) recordCase1();
-    else recordCase2();
-  }
-
-  void search(int branchRow, uint32_t branchMask,
-              uint32_t remRows, uint32_t remCols, int remCount, const uint16_t* dom) {
-    uint16_t curDom[12];
-    const int lastIdx = last;
-
-    while (branchMask) {
-      int pRow = branchRow;
-      uint32_t pBit = branchMask & (~branchMask + 1u);
-      branchMask ^= pBit;
-
-      uint32_t rRows = remRows;
-      uint32_t rCols = remCols;
-      int rCnt = remCount;
-      const uint16_t* srcDom = dom;
-
-      // Inline Unit Propagation: terus tempatkan baris berdomain 1 tanpa rekursi.
-      while (true) {
-        pos[pRow] = static_cast<uint8_t>(__builtin_ctz(pBit));
-        rRows ^= (1u << pRow);
-        rCols ^= pBit;
-        --rCnt;
-
-        // Kasus dasar 0..2 baris tersisa (tanpa alokasi array & tanpa rekursi)
-        if (__builtin_expect(rCnt <= 2, 0)) {
-          if (rCnt == 2) {
-            const int r1 = __builtin_ctz(rRows);
-            const int r2 = __builtin_ctz(rRows & (rRows - 1u));
-            const int d1 = (r1 > pRow) ? (r1 - pRow) : (pRow - r1);
-            const int d2 = (r2 > pRow) ? (r2 - pRow) : (pRow - r2);
-            uint32_t m1 = static_cast<uint32_t>(srcDom[r1]) & ~(pBit | (pBit << d1) | (pBit >> d1));
-            const uint32_t m2 = static_cast<uint32_t>(srcDom[r2]) & ~(pBit | (pBit << d2) | (pBit >> d2));
-            if (m1 && m2 && ((m1 | m2) == rCols)) {
-              const int d12 = r2 - r1;
-              while (m1) {
-                const uint32_t b1 = m1 & (~m1 + 1u);
-                m1 ^= b1;
-                const uint32_t b2 = m2 & ~(b1 | (b1 << d12) | (b1 >> d12));
-                if (b2) {
-                  pos[r1] = static_cast<uint8_t>(__builtin_ctz(b1));
-                  pos[r2] = static_cast<uint8_t>(__builtin_ctz(b2));
-                  record();
-                }
-              }
-            }
-          } else if (rCnt == 1) {
-            const int rLast = __builtin_ctz(rRows);
-            const int d = (rLast > pRow) ? (rLast - pRow) : (pRow - rLast);
-            const uint32_t m = static_cast<uint32_t>(srcDom[rLast]) & ~(pBit | (pBit << d) | (pBit >> d));
-            if (m) {
-              pos[rLast] = static_cast<uint8_t>(__builtin_ctz(m));
-              record();
-            }
-          } else {
-            record();
-          }
-          break;
-        }
-
-        // Forward Checking (baris & kolom) + Greedy MRV + Degree Heuristic (jarak ke tengah)
-        uint32_t tmp = rRows;
-        uint32_t seen1 = 0u;
-        uint32_t bestKey = 0xFFFFFFFFu;
-        bool ok = true;
-
-        while (tmp) {
-          const int r = __builtin_ctz(tmp);
-          tmp &= tmp - 1u;
-          const int d = (r > pRow) ? (r - pRow) : (pRow - r);
-          const uint32_t m = static_cast<uint32_t>(srcDom[r]) & ~(pBit | (pBit << d) | (pBit >> d));
-          if (!m) {
-            ok = false;
-            break;
-          }
-          curDom[r] = static_cast<uint16_t>(m);
-          seen1 |= m;
-          const int distCtr = (2 * r >= lastIdx) ? (2 * r - lastIdx) : (lastIdx - 2 * r);
-          const uint32_t key = (static_cast<uint32_t>(__builtin_popcount(m)) << 24) |
-                               (static_cast<uint32_t>(distCtr) << 20) |
-                               (static_cast<uint32_t>(r) << 16) | m;
-          if (key < bestKey) bestKey = key;
-        }
-        if (!ok || seen1 != rCols) break;
-
-        const int bestRow = static_cast<int>((bestKey >> 16) & 15u);
-        const uint32_t bestMask = bestKey & 0xFFFFu;
-
-        if ((bestKey >> 24) == 1u) {
-          pRow = bestRow;
-          pBit = bestMask;
-          srcDom = curDom;
-          continue;
-        }
-
-        search(bestRow, bestMask, rRows, rCols, rCnt, curDom);
-        break;
-      }
+      for (int j = 0; j < k; ++j) if ((mask & (1u << j)) && std::memcmp(sym[k], sym[j], static_cast<size_t>(N)) == 0) { dup = true; break; }
+      if (!dup) { mask |= static_cast<uint8_t>(1u << k); ++cnt; }
     }
   }
+  saveRec<N>(st, b, mask, cnt);
+}
 
-  void launch(uint32_t remRows, uint32_t remCols, int remCnt, const uint16_t* dom) {
-    uint32_t tmp = remRows;
-    uint32_t seen1 = 0u;
-    uint32_t bestKey = 0xFFFFFFFFu;
-    while (tmp) {
-      const int r = __builtin_ctz(tmp);
-      tmp &= tmp - 1u;
-      const uint32_t m = dom[r];
-      if (!m) return;
-      seen1 |= m;
-      const int distCtr = (2 * r >= last) ? (2 * r - last) : (last - 2 * r);
-      const uint32_t key = (static_cast<uint32_t>(__builtin_popcount(m)) << 24) |
-                           (static_cast<uint32_t>(distCtr) << 20) |
-                           (static_cast<uint32_t>(r) << 16) | m;
-      if (key < bestKey) bestKey = key;
+template <int N, int R>
+__attribute__((always_inline)) inline void dfs1(uint32_t avail, uint32_t cols, uint32_t d1, uint32_t d2, int c1, BufState& st) {
+  const uint32_t fullMask = (1u << N) - 1u;
+  if constexpr (R == N - 2) {
+    while (avail) {
+      const uint32_t bit = avail & (~avail + 1u); avail ^= bit;
+      if (const uint32_t la = fullMask & ~((cols | bit) | ((d1 | bit) << 1) | ((d2 | bit) >> 1))) { st.bits[R] = bit; st.bits[N - 1] = la; record1<N>(st); }
     }
-    if (seen1 != remCols) return;
-    search(static_cast<int>((bestKey >> 16) & 15u), bestKey & 0xFFFFu,
-           remRows, remCols, remCnt, dom);
+  } else {
+    const uint32_t allowNext = (R + 1 < c1) ? (fullMask & ~2u) : fullMask;
+    while (avail) {
+      const uint32_t bit = avail & (~avail + 1u); avail ^= bit;
+      const uint32_t nc = cols | bit, nd1 = (d1 | bit) << 1, nd2 = (d2 | bit) >> 1;
+      if (const uint32_t nextAvail = allowNext & ~(nc | nd1 | nd2)) { st.bits[R] = bit; dfs1<N, R + 1>(nextAvail, nc, nd1, nd2, c1, st); }
+    }
   }
-};
+}
 
-}  // namespace
+template <int N, int C0, int R>
+__attribute__((always_inline)) inline void dfs2(uint32_t avail, uint32_t cols, uint32_t d1, uint32_t d2, const uint32_t* __restrict allow, BufState& st) {
+  const int last = N - 1;
+  const uint32_t rightBit = 1u << last, lastMask = ((1u << (N - C0)) - 1u) & ~((1u << (C0 + 1)) - 1u);
+  if constexpr (R == N - 2) {
+    while (avail) {
+      const uint32_t bit = avail & (~avail + 1u); avail ^= bit;
+      if (const uint32_t la = allow[last] & ~((cols | bit) | ((d1 | bit) << 1) | ((d2 | bit) >> 1))) { st.bits[R] = bit; st.bits[last] = la; record2<N, C0>(st); }
+    }
+  } else {
+    const int nr = R + 1;
+    const uint32_t allowNext = allow[nr];
+    while (avail) {
+      const uint32_t bit = avail & (~avail + 1u); avail ^= bit;
+      const uint32_t nc = cols | bit;
+      if constexpr (C0 + 1 < last - C0) if ((nc & lastMask) == lastMask) continue;
+      const uint32_t nd1 = (d1 | bit) << 1, nd2 = (d2 | bit) >> 1;
+      uint32_t nextAvail = allowNext & ~(nc | nd1 | nd2);
+      if constexpr (nr == N - 2 - C0) { if (!(nc & rightBit)) nextAvail &= rightBit; }
+      else if constexpr (nr == N - 1 - C0) { if (!(nc & 1u)) nextAvail &= 1u; }
+      if (nextAvail) { st.bits[R] = bit; dfs2<N, C0, nr>(nextAvail, nc, nd1, nd2, allow, st); }
+    }
+  }
+}
+
+template <int N, int C0>
+__attribute__((noinline)) void runOneC0(BufState& st) {
+  const int last = N - 1;
+  const uint32_t fullMask = (1u << N) - 1u, rightBit = 1u << last, edgeMask = 1u | rightBit, b0 = 1u << C0;
+  uint32_t allow[N];
+  for (int r = 1; r < last; ++r) {
+    uint32_t m = fullMask;
+    if (r < C0 || r >= N - C0) m &= ~edgeMask;
+    if (r == C0) m &= ~1u;
+    if (r == last - C0) m &= ~rightBit;
+    if constexpr (C0 + 1 == last - C0) {
+      const int fc = C0 + 1, dist = last - r;
+      m &= ~(1u << fc);
+      if (fc >= dist) m &= ~(1u << (fc - dist));
+      if (fc + dist < N) m &= ~(1u << (fc + dist));
+    }
+    allow[r] = m;
+  }
+  allow[last] = ((1u << (N - C0)) - 1u) & ~((1u << (C0 + 1)) - 1u);
+  st.bits[0] = b0;
+  uint32_t av1 = allow[1] & ~(b0 | (b0 << 1) | (b0 >> 1));
+  if constexpr (1 == N - 2 - C0) av1 &= rightBit;
+  if (av1) dfs2<N, C0, 1>(av1, b0, b0 << 1, b0 >> 1, allow, st);
+}
+
+template <int N, int C0, int MaxC0>
+inline void runCase2All(BufState& st) {
+  if constexpr (C0 <= MaxC0) { runOneC0<N, C0>(st); runCase2All<N, C0 + 1, MaxC0>(st); }
+}
+
+template <int N>
+std::vector<std::vector<int>> runN() {
+  std::vector<std::vector<int>> solutions;
+  uint8_t rawBuf[N == 12 ? 23500 : (N == 11 ? 4500 : 1200)];
+  BufState st{{1u}, 0u, 0u, 0u, rawBuf};
+  const uint32_t fullMask = (1u << N) - 1u;
+  for (int c1 = 2; c1 < N; ++c1) {
+    const uint32_t b1 = 1u << c1; st.bits[1] = b1;
+    const uint32_t c2 = 1u | b1, d1 = (2u | b1) << 1, d2 = b1 >> 1;
+    if (const uint32_t av2 = ((2 < c1) ? (fullMask & ~2u) : fullMask) & ~(c2 | d1 | d2)) dfs1<N, 2>(av2, c2, d1, d2, c1, st);
+  }
+  runCase2All<N, 1, ((N - 2) >> 1)>(st);
+  solutions.reserve(st.total);
+  emitBatch<N>(solutions, rawBuf, st.count);
+  return solutions;
+}
+
+}
 
 std::vector<std::vector<int>> solveNQueens(int n) {
-  std::vector<std::vector<int>> solutions;
-  if (n <= 0 || n > 12) return solutions;
-  if (n == 1) {
-    solutions.emplace_back(1, 0);
-    return solutions;
+  switch (n) {
+    case 1: return {{0}};
+    case 4: return runN<4>(); case 5: return runN<5>(); case 6: return runN<6>();
+    case 7: return runN<7>(); case 8: return runN<8>(); case 9: return runN<9>();
+    case 10: return runN<10>(); case 11: return runN<11>(); case 12: return runN<12>();
+    default: return {};
   }
-  if (n < 4) return solutions;
-
-  D4MrvSolver solver;
-  solver.n = n;
-  solver.last = n - 1;
-  solver.fullMask = (1u << n) - 1u;
-  solver.out = &solutions;
-
-  const int last = n - 1;
-  const uint32_t fullMask = solver.fullMask;
-  const uint32_t rightBit = 1u << last;
-  const uint32_t edgeMask = 1u | rightBit;
-
-  // Kasus 1 (Simetri D4): Ratu di sudut (0, 0), pilih kolom baris 1 di c1 = 2..n-1.
-  solver.curCase1 = true;
-  solver.pos[0] = 0;
-  for (int c1 = 2; c1 < n; ++c1) {
-    const uint32_t b1 = 1u << c1;
-    solver.pos[1] = static_cast<uint8_t>(c1);
-    uint16_t dom[12];
-    for (int r = 2; r < n; ++r) {
-      const uint32_t allow = (r < c1) ? (fullMask & ~2u) : fullMask;
-      const int d1 = r - 1;
-      dom[r] = static_cast<uint16_t>(allow & ~(1u | (1u << r) | b1 | (b1 << d1) | (b1 >> d1)));
-    }
-    solver.launch(fullMask ^ 3u, fullMask ^ (1u | b1), n - 2, dom);
-  }
-
-  // Kasus 2 (Simetri D4): Tidak ada ratu sudut; jarak minimum ke sudut adalah c0 (1 <= c0 <= (N-2)/2).
-  solver.curCase1 = false;
-  for (int c0 = 1; c0 <= (n - 2) / 2; ++c0) {
-    solver.curC0 = c0;
-    const uint32_t b0 = 1u << c0;
-    solver.pos[0] = static_cast<uint8_t>(c0);
-    const uint32_t lastMask = ((1u << (n - c0)) - 1u) & ~((1u << (c0 + 1)) - 1u);
-    uint16_t dom[12];
-    for (int r = 1; r < n; ++r) {
-      uint32_t allow = (r == last) ? lastMask : fullMask;
-      if (r != last) {
-        if (r < c0 || r >= n - c0) allow &= ~edgeMask;
-        if (r == c0) allow &= ~1u;
-        if (r == last - c0) allow &= ~rightBit;
-      }
-      dom[r] = static_cast<uint16_t>(allow & ~(b0 | (b0 << r) | (b0 >> r)));
-    }
-    solver.launch(fullMask ^ 1u, fullMask ^ b0, n - 1, dom);
-  }
-
-  return solutions;
 }
