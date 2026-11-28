@@ -1,6 +1,6 @@
 // Browser worker adapter: a thin shell over the environment-neutral runSolver().
 import { measureSolver } from "./measure";
-import type { LoadHooks, SolverModule } from "./run-solver";
+import type { SolverModule } from "./run-solver";
 import type { FromWorker, ToWorker } from "./protocol";
 
 const ctx = self as unknown as {
@@ -18,13 +18,9 @@ self.onmessage = async (e: MessageEvent<ToWorker>) => {
       snapshotHead: msg.snapshotHead,
       snapshotTail: msg.snapshotTail,
       timedRuns: msg.timedRuns,
-      ...(msg.warmupRun ? { warmupRun: true } : {}),
-      loadModule: async (hooks: LoadHooks): Promise<SolverModule> => {
+      loadModule: async (): Promise<SolverModule> => {
         const { default: createSolver } = await import(/* @vite-ignore */ moduleUrl);
-        return createSolver({
-          locateFile: (f: string) => new URL(f, moduleUrl).href,
-          preRun: [hooks.preRun],
-        });
+        return createSolver({ locateFile: (f: string) => new URL(f, moduleUrl).href });
       },
       report: (m) => {
         // The result can be tens of megabytes: hand over the buffers instead of copying them.
